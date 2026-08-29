@@ -1,0 +1,16 @@
+{
+  "name": "dasha_koza",
+  "created_at": "2026-08-26",
+  "steps": [
+    {"pose": "home1", "duration": 2.0, "pause": 0.1},
+    {"pose": "dasha_koza_1", "duration": 0.5, "pause": 0.05, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "dasha_koza_2", "duration": 0.5, "pause": 0.05, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "dasha_koza_1", "duration": 0.5, "pause": 0.05, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "dasha_koza_2", "duration": 0.5, "pause": 0.05, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "dasha_koza_1", "duration": 0.5, "pause": 0.05, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "dasha_koza_2", "duration": 0.5, "pause": 0.05, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "dasha_koza_1", "duration": 0.5, "pause": 0.05, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "dasha_koza_2", "duration": 0.5, "pause": 0.1, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "home", "duration": 2.0, "pause": 0.0, "hands": {"left": "fist", "right": "fist"}}
+  ]
+}

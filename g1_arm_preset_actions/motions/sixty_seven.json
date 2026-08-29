@@ -1,0 +1,16 @@
+{
+  "name": "sixty_seven",
+  "created_at": "2026-08-26",
+  "steps": [
+    {"pose": "home1", "duration": 2.0, "pause": 0.1},
+    {"pose": "67_1", "duration": 1.0, "pause": 0.1, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "67_2", "duration": 1.0, "pause": 0.1, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "67_1", "duration": 1.0, "pause": 0.1, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "67_2", "duration": 1.0, "pause": 0.1, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "67_1", "duration": 1.0, "pause": 0.1, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "67_2", "duration": 1.0, "pause": 0.1, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "67_1", "duration": 1.0, "pause": 0.1, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "67_2", "duration": 1.0, "pause": 0.2, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "home", "duration": 2.0, "pause": 0.0, "hands": {"left": "fist", "right": "fist"}}
+  ]
+}

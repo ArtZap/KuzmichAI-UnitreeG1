@@ -1,0 +1,10 @@
+{
+  "name": "facepalm",
+  "created_at": "2026-08-26",
+  "steps": [
+    {"pose": "home1", "duration": 2.0, "pause": 0.1},
+    {"pose": "faceprepare", "duration": 1.5, "pause": 0.2, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "facepalm", "duration": 1.5, "pause": 0.6, "hands": {"left": "thumb_closed_two_straight", "right": "thumb_closed_two_straight"}},
+    {"pose": "home", "duration": 2.0, "pause": 0.0, "hands": {"left": "fist", "right": "fist"}}
+  ]
+}

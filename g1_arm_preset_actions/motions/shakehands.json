@@ -1,0 +1,13 @@
+{
+  "name": "shakehands",
+  "created_at": "2026-08-26",
+  "steps": [
+    {"pose": "home1", "duration": 2.0, "pause": 0.1},
+    {"pose": "shakehands_1", "duration": 0.8, "pause": 0.1, "hands": {"left": "open", "right": "shake_soft"}},
+    {"pose": "shakehands_2", "duration": 0.8, "pause": 0.1, "hands": {"left": "open", "right": "shake_strong"}},
+    {"pose": "shakehands_1", "duration": 0.8, "pause": 0.2, "hands": {"left": "open", "right": "shake_strong"}},
+    {"pose": "shakehands_2", "duration": 0.8, "pause": 0.1, "hands": {"left": "open", "right": "shake_strong"}},
+    {"pose": "shakehands_1", "duration": 0.8, "pause": 0.2, "hands": {"left": "open", "right": "shake_strong"}},
+    {"pose": "home", "duration": 2.0, "pause": 0.0, "hands": {"left": "fist", "right": "fist"}}
+  ]
+}
