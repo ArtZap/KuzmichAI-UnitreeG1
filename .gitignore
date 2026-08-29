@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+venv/
+models/
+cache_audio/
+cache_analyz_audio/
+kb_audio/
+*.wav
+*.faiss
+*.pkl
