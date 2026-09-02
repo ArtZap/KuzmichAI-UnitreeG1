@@ -28,8 +28,8 @@ class G1GestureController:
         
         # IP робота берем из переменных окружения
         self.robot_ip = os.environ.get("VOICE_ENGINE_ROBOT_IP", "192.168.1.103")
-        # Формируем URL для обращения к API на 8090 порту
-        self.api_url = f"http://{self.robot_ip}:8090"
+        # Формируем URL для обращения к API на 8091 порту
+        self.api_url = f"http://{self.robot_ip}:8091"
 
     def start(self, gesture_name: str) -> None:
         """Отправляет HTTP-запрос на запуск жеста, если робот не занят."""

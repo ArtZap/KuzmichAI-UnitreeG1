@@ -37,7 +37,8 @@ sudo apt-get install -y \
     cmake \
     gcc \
     g++ \
-    ffmpeg
+    ffmpeg \
+    espeak
 
 # 3. Настройка виртуального окружения
 echo -e "\n${YELLOW}[3/7] Создание и активация виртуального окружения (venv)...${NC}"

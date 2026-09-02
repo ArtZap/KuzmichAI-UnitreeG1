@@ -56,21 +56,24 @@ class WhisperBackend:
         )
 
     def transcribe(self, audio_array: np.ndarray, language: Optional[str] = None) -> Tuple[str, str]:
-        # Жесткие настройки декодирования для подавления галлюцинаций в шуме
         segments, info = self.model.transcribe(
             audio_array,
             language=language,
-            beam_size=1,                       # Убиваем "фантазию"
-            temperature=0.0,                   # Строгий детерминизм
-            no_speech_threshold=0.5,           # Жесткая отсечка тишины
-            condition_on_previous_text=False,  # Защита от зацикливания
-            vad_filter=False,                  # VAD уже отработал в audio_io.py
-#            vad_parameters=dict(min_silence_duration_ms=400),
+            beam_size=5,                       
+            temperature=0.0,                   
+            no_speech_threshold=0.5,           
+            condition_on_previous_text=False,  
+            vad_filter=False,                  
         )
         text = "".join(segment.text for segment in segments).strip()
         detected_lang = getattr(info, "language", None)
-        return text, detected_lang
+        lang_prob = getattr(info, "language_probability", 0.0)
 
+        if detected_lang != "ru" and lang_prob < 0.6:
+            logger.info("Низкая вероятность языка (%.2f). Принудительно ставлю 'ru'.", lang_prob)
+            detected_lang = "ru"
+
+        return text, detected_lang
 
 # ---------------------------------------------------------------------------
 # Бэкенд 2: NVIDIA NeMo (Parakeet / Canary)

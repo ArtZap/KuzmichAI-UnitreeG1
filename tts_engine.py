@@ -142,7 +142,7 @@ class TTSEngine:
     ) -> None:
         self.interface = network_interface
         self.backend = (backend or os.environ.get("VOICE_ENGINE_TTS", "piper")).strip().lower()
-        if self.backend not in {"xtts", "piper", "auto"}:
+        if self.backend not in {"xtts", "piper", "espeak", "auto"}:
             logger.warning("Unknown VOICE_ENGINE_TTS=%r, using piper.", self.backend)
             self.backend = "piper"
 
@@ -188,6 +188,9 @@ class TTSEngine:
     def _ensure_system_tools(self) -> None:
         if subprocess.run(["which", "sox"], capture_output=True).returncode != 0:
             raise TTSEngineError("sox is not installed. Install: sudo apt install sox")
+        if self.backend == "espeak":
+            if subprocess.run(["which", "espeak"], capture_output=True).returncode != 0:
+                raise TTSEngineError("espeak is not installed. Install: sudo apt install espeak")
         if self.backend in {"piper", "auto"} or self.allow_piper_fallback:
             if not Path(self.piper_bin).exists():
                 raise TTSEngineError("Piper binary not found: {}".format(self.piper_bin))
@@ -241,7 +244,6 @@ class TTSEngine:
             import torchaudio
             import soundfile as sf
 
-            # --- ЖЕЛЕЗОБЕТОННЫЙ ХАК ДЛЯ TORCHAUDIO ---
             if not hasattr(torchaudio, "_patched_for_soundfile"):
                 def _sf_load(filepath, **kwargs):
                     import soundfile as sf # на всякий случай
@@ -254,7 +256,6 @@ class TTSEngine:
                 torchaudio.load = _sf_load
                 torchaudio._patched_for_soundfile = True
 
-            # --- ХАК ДЛЯ PYTORCH 2.6+ (weights_only) ---
             if not hasattr(torch, "_patched_for_tts"):
                 _original_load = torch.load
                 def _patched_load(*args, **kwargs):
@@ -262,7 +263,6 @@ class TTSEngine:
                     return _original_load(*args, **kwargs)
                 torch.load = _patched_load
                 torch._patched_for_tts = True
-            # -----------------------------
             
             from TTS.api import TTS
         except Exception as exc:
@@ -307,6 +307,9 @@ class TTSEngine:
 
         if self.backend == "piper":
             return self._synthesize_piper(text, lang, str(output))
+
+        if self.backend == "espeak":
+            return self._synthesize_espeak(text, lang, str(output))
 
         try:
             if lang not in self._xtts_languages:
@@ -407,6 +410,32 @@ class TTSEngine:
         ]
         _run_checked(command, input_bytes=text.encode("utf-8"), timeout=30)
         self._convert_to_g1_wav(raw_wav, output_path)
+        Path(raw_wav).unlink(missing_ok=True)
+        return output_path
+
+    # ------------------------------------------------------------------ #
+    # eSpeak backend
+    # ------------------------------------------------------------------ #
+    def _synthesize_espeak(self, text: str, lang: str, output_path: str) -> str:
+        raw_wav = output_path + ".espeak.raw.wav"
+        
+        # Настройки eSpeak:
+        # -v <lang> : язык (например, ru или en)
+        # -p 20     : pitch (высота тона). Значение 20 делает голос ниже и "суровее"
+        # -s 140    : speed (скорость). 140 чуть медленнее дефолта, звучит более размеренно
+        command = [
+            "espeak",
+            "-v", lang,
+            "-p", "20",
+            "-s", "140",
+            "-w", raw_wav,
+            text
+        ]
+        
+        _run_checked(command, timeout=10)
+        
+        self._convert_to_g1_wav(raw_wav, output_path)
+        
         Path(raw_wav).unlink(missing_ok=True)
         return output_path
 

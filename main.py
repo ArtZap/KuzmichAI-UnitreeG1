@@ -470,11 +470,14 @@ class VoiceAssistant:
 
                 # Перехват тегов жестикуляции 
                 gesture_match = re.search(r'\[жест:?\s*([^\]]+)\]', sentence, flags=re.IGNORECASE)
+                g_name_to_pass = None
+                
                 if gesture_match:
                     raw_g_name = gesture_match.group(1).strip().lower()
                     g_name = raw_g_name.translate(str.maketrans("осаехр", "osacxp"))
                     
-                    self.gestures.start(g_name)
+                    g_name_to_pass = g_name 
+                    
                     if detected_gestures is not None and not detected_gestures:
                         detected_gestures.append(g_name) 
                         
@@ -494,7 +497,7 @@ class VoiceAssistant:
                     log.error("TTS ошибка для «%s»: %s", sentence, exc)
                     continue  
                 
-                await wav_queue.put(wav_path)
+                await wav_queue.put((wav_path, g_name_to_pass)) 
                 log.debug("Worker-TTS: wav помещён в очередь (%s)", wav_path)
 
         except asyncio.CancelledError:
@@ -548,31 +551,25 @@ class VoiceAssistant:
                 # --- Проверка прерывания ДО чтения из очереди ---
                 if self._interrupted.is_set():
                     log.info("--> Worker-Player: прерывание, прекращаем воспроизведение")
-                    # Дренируем очередь — убираем оставшиеся wav и sentinel,
-                    # чтобы не оставлять «мусор» для следующей итерации
                     _drain_queue(wav_queue)
                     break
 
-                # Ждём следующего элемента из очереди.
-                # asyncio.wait_for позволяет периодически «просыпаться»
-                # и проверять флаг прерывания — иначе при прерывании
-                # во время ожидания get() Worker-2 мог бы зависнуть до
-                # появления следующего wav или sentinel.
                 try:
                     item = await asyncio.wait_for(wav_queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
-                    # Очередь пуста — проверяем прерывание и ждём дальше
                     continue
 
                 # --- Проверяем: это sentinel или wav_path? ---
                 if item is _QUEUE_SENTINEL:
-                    # Worker-1 завершил работу. Выходим из цикла.
                     log.debug("Worker-Player: получен sentinel, завершаем цикл")
                     wav_queue.task_done()
                     break
 
-                # --- Это wav_path — воспроизводим ---
-                wav_path: str = item
+                wav_path, g_name = item
+                
+                if g_name:
+                    self.gestures.start(g_name) 
+                
                 log.info("--> Воспроизводим: %s", wav_path)
                 played_wavs.append(wav_path)
 
@@ -704,6 +701,11 @@ class VoiceAssistant:
                     if item is _QUEUE_SENTINEL:
                         wav_queue.task_done()
                         break
+                    
+                    wav_path, g_name = item
+                    if g_name:
+                        self.gestures.start(g_name)
+                        
                     wav_queue.task_done()
             player_task = asyncio.ensure_future(_dummy_player())
 
@@ -856,13 +858,17 @@ class VoiceAssistant:
                 query = text.strip()
 
                 # --- АНТИ-ГАЛЛЮЦИНАЦИИ WHISPER ---
+                query_lower = query.lower()
+                
                 hallucinations = [
                     "субтитры", "dima", "torzok", "продолжение следует",
-                    "amara", "редактор", "перевод", "озвучено", "смотреть до конца",
-                    "okay", "mm-hmm", "yeah",
+                    "amara", "редактор", "перевод", "озвучено", "смотреть до конца"
                 ]
-                query_lower = query.lower()
-                if any(h in query_lower for h in hallucinations) or len(query) < 3:
+                exact_hallucinations = [
+                    "okay", "mm-hmm", "yeah", "you", "thank you", "thanks", "окей", "да", "нет"
+                ]
+                
+                if any(h in query_lower for h in hallucinations) or query_lower in exact_hallucinations or len(query) < 3:
                     log.info("Поймана галлюцинация Whisper: «%s» — игнорируем", query)
                     continue
                 # ---------------------------------
@@ -886,39 +892,26 @@ class VoiceAssistant:
                         log.info("--> Команда ПРИВЕТ. Переход в активный режим.")
                         self.is_awake = True
                     if "поздоровайся" in clean_words:
-                        greeting_path = str(PROJECT_DIR / "greetings.wav")
+                        log.info("--> Команда ПОЗДОРОВАЙСЯ. Запуск приветственной речи с жестами.")
                         
-                        if not os.path.exists(greeting_path):
-                            log.info("Файл greetings.wav не найден, запускаю синтез...")
-                            greeting_text = (
-                                "Здравствуйте, уважаемые представители Министерства сельского хозяйства! "
-                                "Меня зовут Кузьмич, и я — главный «цифровой сотрудник» команды студентов агрохакатона на Истринской сыроварне. "
-                                "Пока мои создатели изучают ремесленные традиции сыроделия, я занимаюсь тем, что умею лучше всего: анализирую процессы, автоматизирую рутину, собираю данные и помогаю принимать точные технологические решения. "
-                                "Мы здесь, чтобы показать, как современные агротехнологии могут работать рука об руку с вековыми традициями. "
-                                "А я — живое доказательство того, что будущее сельского хозяйства — за умными машинами и людьми, которые умеют ими управлять. "
-                                "Спасибо, что вы с нами. Мы готовы к диалогу!"
-                            )
-                            try:
-                                await loop.run_in_executor(
-                                    self.executor,
-                                    self.tts.synthesize,
-                                    greeting_text,
-                                    "ru",
-                                    greeting_path
-                                )
-                                log.info("Приветствие успешно синтезировано и сохранено в %s", greeting_path)
-                            except Exception as exc:
-                                log.error("Ошибка при синтезе приветствия: %s", exc)
-                                continue
+                        self.is_analiz = True 
                         
-                        log.info("Проигрываю приветственную речь.")
+                        def greeting_gen():
+                            yield "[жест: tolk] Здравствуйте, уважаемые представители Министерства сельского хозяйства!"
+                            yield "Меня зовут Кузьмич,и я — главный «цифровой сотрудник» команды студентов агрохакатона на Истринской сыроварне."
+                            yield "Пока мои создатели изучают ремесленные традиции сыроделия, я занимаюсь тем, что умею лучше всего:"
+                            yield "анализирую процессы, автоматизирую рутину, собираю данные и помогаю принимать точные технологические решения."
+                            yield "Мы здесь, чтобы показать, как современные агротехнологии могут работать рука об руку с вековыми традициями."
+                            yield "А я — живое доказательство того"
+                            yield "что будущее сельского хозяйства — за умными машинами и людьми, которые умеют ими управлять."
+                            yield "Спасибо, что вы с нами. Мы готовы к диалогу!"
+
                         try:
-                            await self._play(greeting_path)
+                            await self._run_streaming_pipeline(query, lang_code, custom_generator=greeting_gen())
                         except Exception as exc:
-                            log.error("Ошибка воспроизведения приветствия: %s", exc)
+                            log.error("Ошибка при воспроизведении приветствия: %s", exc)
                             
-                        continue  # Завершаем текущую итерацию и снова слушаем микрофон
-                            
+                        continue                            
 
                 if not self.is_awake:
                     log.debug("Спящий режим. Игнорирую: %s", query)
@@ -943,24 +936,21 @@ class VoiceAssistant:
                         log.error("Ошибка VLM-анализа: %s", exc)
                         query = "Пользователь попросил анализ, но твоя камера не отвечает. Пошути на тему сломанных советских датчиков."
 
-                # ── Шаг 3: Поиск в семантическом кэше и Базе Знаний ───────────
+                # ── Шаг 3: Поиск в семантических кэшах ───────────
                 cache_result = None
-                is_kb_fact = False
-                kb_fact_text = ""
 
-                if not ENABLE_CONTEXT or not self.llm.chat_history:
-                    # 1. Сначала ищем в "несгораемом" кэше базы знаний
+                # 1. Базу знаний (факты) проверяем ВСЕГДА, независимо от контекста диалога
+                try:
+                    cache_result = await loop.run_in_executor(self.executor, self.kb_cache.search, query, lang_code)
+                except Exception as exc:
+                    log.error("Ошибка поиска в kb_cache: %s", exc)
+
+                # 2. Обычный разговорный кэш проверяем, только если память пуста
+                if not cache_result and (not ENABLE_CONTEXT or not self.llm.chat_history):
                     try:
-                        cache_result = await loop.run_in_executor(self.executor, self.kb_cache.search, query, lang_code)
+                        cache_result = await self._run_cache_search(query, lang_code)
                     except Exception as exc:
-                        log.error("Ошибка поиска в kb_cache: %s", exc)
-
-                    # 2. Если там пусто, ищем в обычном кэше
-                    if not cache_result:
-                        try:
-                            cache_result = await self._run_cache_search(query, lang_code)
-                        except Exception as exc:
-                            log.error("SemanticCache ошибка поиска: %s", exc)
+                        log.error("SemanticCache ошибка поиска: %s", exc)
 
                 if cache_result is not None and not self.is_analiz:
                     cached_wav = cache_result.get("audio_path") if isinstance(cache_result, dict) else getattr(cache_result, "audio_path", cache_result)
@@ -979,18 +969,15 @@ class VoiceAssistant:
                             await self._play(cached_wav)
                         except Exception as exc:
                             log.error("Ошибка воспроизведения кэша: %s", exc)
+                            
+                        self.llm.clear_history()
                         continue
 
                 # ── Шаг 4: Стриминговый конвейер (кэш-промах) ────────────
                 log.info("Кэш-промах, запускаем конвейер LLM→TTS→Player")
 
                 try:
-                    custom_gen = None
-                    if is_kb_fact:
-                        styled_prompt = f"Пользователь задал вопрос: '{query}'. Ответь в своем фирменном стиле, опираясь ИСКЛЮЧИТЕЛЬНО на этот факт из нашей базы: '{kb_fact_text}'"
-                        custom_gen = self.llm.generate_stream(styled_prompt, lang_code)
-
-                    await self._run_streaming_pipeline(query, lang_code, custom_generator=custom_gen)
+                    await self._run_streaming_pipeline(query, lang_code)
                 except asyncio.CancelledError:
                     log.info("Конвейер отменён")
                     raise

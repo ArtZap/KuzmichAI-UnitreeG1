@@ -32,7 +32,7 @@ export VOICE_ENGINE_NEMO_MODEL="nvidia/parakeet-tdt-0.6b-v3"      # nvidia/parak
 export VOICE_ENGINE_STT_LANGUAGE="auto"        # "ru", "en" или "auto" для автоопределения
 
 # 3. Настройки TTS (Синтез)
-export VOICE_ENGINE_TTS="xtts"              # "piper", "xtts" или "auto"
+export VOICE_ENGINE_TTS="xtts"              # "espeak", "piper", "xtts" или "auto"
 export VOICE_ENGINE_TTS_FALLBACK_PIPER="1"   # 1 - использовать Piper, если XTTS упал
 export VOICE_ENGINE_TTS_TEMPO="1.0"         # Скорость речи
 export VOICE_ENGINE_TTS_GAIN_DB="16"         # Усиление звука (в децибелах)
@@ -53,6 +53,7 @@ export HF_HUB_OFFLINE="1"
 export TRANSFORMERS_OFFLINE="1"
 export HF_DATASETS_OFFLINE="1"
 export TOKENIZERS_PARALLELISM="false"
+export NO_PROXY="127.0.0.1,localhost,192.168.1.103,192.168.123.161,192.168.123.164"
 PYTHON_BIN="python3.11"                       # Версия Python для корректной работы TTS
 
 # 6. Настройки шумоподавления и триггерных слов
