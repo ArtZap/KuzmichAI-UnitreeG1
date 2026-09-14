@@ -9,3 +9,7 @@ kb_audio/
 *.wav
 *.faiss
 *.pkl
+g1_voice_engine.log
+piper/
+custom_cache/
+g1_console_gui.py/

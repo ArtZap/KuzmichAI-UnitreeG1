@@ -1,18 +1,18 @@
 """
-main.py — Финальный асинхронный пайплайн голосового ассистента.
+main.py — Final asynchronous pipeline for the voice assistant.
 
-Архитектура:
+Architecture:
   ┌─────────────────────────────────────────────────────────────────────┐
-  │  AudioListener ──► STT ──► SemanticCache ──► AudioPlayer (кэш-хит)  │
+  │  AudioListener ──► STT ──► SemanticCache ──► AudioPlayer (Cache Hit)│
   │                                │                                    │
-  │                           (кэш-промах)                              │
+  │                           (Cache Miss)                              │
   │                                ▼                                    │
   │              ┌─────── StreamingPipeline ─────────┐                  │
   │              │  LLMEngine.generate_stream()      │                  │
-  │              │       │ (предложения)             │                  │
+  │              │       │ (Sentences)               │                  │
   │              │       ▼                           │                  │
   │              │  Worker-1: TTS → wav_path         │                  │
-  │              │       │ put() в Queue             │                  │
+  │              │       │ put() in Queue            │                  │
   │              │       ▼                           │                  │
   │              │  Worker-2: get() → AudioPlayer    │                  │
   │              └───────────────────────────────────┘                  │
@@ -20,7 +20,7 @@ main.py — Финальный асинхронный пайплайн голо�
   │                    merge wavs → SemanticCache.put()                 │
   └─────────────────────────────────────────────────────────────────────┘
 
-Совместимость: Python 3.8+
+Compatibility: Python 3.8+
 """
 
 import asyncio
@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import List, Optional
 
 # ---------------------------------------------------------------------------
-# Импорт модулей проекта
+# Import modules of the voice assistant
 # ---------------------------------------------------------------------------
 from audio_io import AudioListener, AudioPlayer, LocalAudioPlayer
 from llm_engine import LLMEngine
@@ -47,11 +47,41 @@ from tts_engine import TTSEngine
 from g1_greeting_gestures import G1GestureController
 import re
 
+GESTURE_REGEX = re.compile(
+    r'\[(?:жест|jest|gest)[\s:]*([^\]]+)\]', re.IGNORECASE
+)
+
+GESTURE_MAP = {
+    'facechest': 'face_chest',
+    'face_chest': 'face_chest',
+    'dashakoza': 'dasha_koza',
+    'dasha_koza': 'dasha_koza',
+    'moetglaza': 'moet_glaza',
+    'moet_glaza': 'moet_glaza',
+    'sixtyseven': 'sixty_seven',
+    'sixty_seven': 'sixty_seven',
+    'xray': 'x-ray',
+    'x-ray': 'x-ray',
+    'shake_hands': 'shakehands',
+    'shakehands': 'shakehands',
+    'mouth_keeper': 'mouthkeeper',
+    'mouthkeeper': 'mouthkeeper',
+}
+
+
+def normalize_gesture_name(raw_name: str) -> str:
+  if not raw_name:
+    return ''
+  cleaned = raw_name.strip().lower()
+  cleaned = cleaned.translate(str.maketrans('осаехр', 'osacxp'))
+  cleaned = cleaned.replace('"', '').replace("'", '').strip()
+  return GESTURE_MAP.get(cleaned, cleaned)
+
 # ---------------------------------------------------------------------------
-# Конфигурация логирования (Цветная)
+# Configuration of logging (Colored)
 # ---------------------------------------------------------------------------
 class ColorFormatter(logging.Formatter):
-    """Кастомный форматтер для раскраски логов в консоли."""
+    """Custom formatter for coloring logs in the console."""
     
     grey = "\x1b[38;5;240m"
     blue = "\x1b[38;5;39m"
@@ -92,7 +122,7 @@ logging.basicConfig(
 log = logging.getLogger("VoiceAssistant")
 
 # ---------------------------------------------------------------------------
-# Функция анализа сцены
+# Function for scene analysis
 # ---------------------------------------------------------------------------
 
 sys.path.append("/home/unitree/agrohub_cloud")
@@ -100,38 +130,38 @@ try:
     from analyze_for_tts import analyze_for_tts
 except ImportError:
     analyze_for_tts = None
-    log.warning("Модуль analyze_for_tts не найден. Команда 'Анализ' не будет работать.")
+    log.warning("The analyze_for_tts module was not found. The 'Analyze' command will not work..")
 
 # ---------------------------------------------------------------------------
-# Константы
+# Constants
 # ---------------------------------------------------------------------------
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
-# Директория для хранения финальных wav-файлов ответов (для кэша)
+# Directory for storing final wav files of responses (for cache)
 CACHE_WAV_DIR = PROJECT_DIR / "cache_audio"
 CACHE_ANALYZ_WAV_DIR = PROJECT_DIR / "cache_analyz_audio"
-# Директория для хранения защищенных ответов из Базы Знаний
+# Directory for storing protected responses from the Knowledge Base
 KB_CACHE_WAV_DIR = PROJECT_DIR / "kb_audio"
 
-# Токен-«яд» (sentinel), который Worker-1 кладёт в очередь,
-# чтобы сообщить Worker-2 об окончании потока.
-# Использование объекта-синглтона гарантирует строгое сравнение по идентичности (is).
+# Token-«poison» (sentinel), which Worker-1 puts in the queue,
+# to notify Worker-2 about the end of the stream.
+# Using a singleton object ensures strict comparison by identity (is).
 _QUEUE_SENTINEL = object()
 
-# Максимальное число потоков в пуле (ML-модели тяжёлые, не делаем слишком много)
+# Maximum number of threads in the pool (ML models are heavy, don't create too many)
 EXECUTOR_MAX_WORKERS = 4
 
-# Режим работы с аудио:
-#   "g1"    (по умолчанию) — микрофон и динамики настоящего робота G1
-#            через UDP-мультикаст и DDS/AudioClient. Требует сеть робота.
-#   "local" — микрофон и динамики ноутбука через sounddevice. Полностью
-#            локально, сеть/подключение к роботу не нужны вообще.
-# Переключается переменной окружения, например:
+# Audio mode:
+#   "g1"    (by default) — microphone and speakers of the real G1 robot
+#            via UDP multicast and DDS/AudioClient. Requires the robot's network.
+#   "local" — microphone and speakers of the local laptop via sounddevice. Fully
+#            local, no network/connection to the robot needed.
+# Switched by the environment variable, for example:
 #   VOICE_ENGINE_AUDIO=local python main.py
 AUDIO_MODE = os.environ.get("VOICE_ENGINE_AUDIO", "g1").strip().lower()
 if AUDIO_MODE not in ("g1", "local"):
-    log.warning("Неизвестное значение VOICE_ENGINE_AUDIO=%r, использую 'g1'.", AUDIO_MODE)
+    log.warning("Unknown value for VOICE_ENGINE_AUDIO=%r, using 'g1'.", AUDIO_MODE)
     AUDIO_MODE = "g1"
 
 ENABLE_STREAMING = os.environ.get("VOICE_ENGINE_ENABLE_STREAMING", "true").strip().lower() == "true"
@@ -150,25 +180,25 @@ STT_LANG = None if STT_LANGUAGE_ENV == "auto" else STT_LANGUAGE_ENV
 ENABLE_GESTURES = os.environ.get("VOICE_ENGINE_ENABLE_GESTURES", "true").strip().lower() == "true"
 
 # ===========================================================================
-# Вспомогательная функция: слияние wav-файлов
+# Helper function: merging WAV files
 # ===========================================================================
 
 def merge_wav_files(input_paths: List[str], output_path: str) -> None:
     """
-    Склеивает несколько .wav файлов в один при помощи стандартного модуля `wave`.
+    Merges several .wav files into one using the standard `wave` module.
 
-    Все входные файлы ДОЛЖНЫ иметь одинаковые параметры:
-      - число каналов (nchannels)
-      - ширину сэмпла (sampwidth)
-      - частоту дискретизации (framerate)
+    All input files MUST have the same parameters:
+      - number of channels (nchannels)
+      - sample width (sampwidth)
+      - sampling rate (framerate)
 
-    Параметры
-    ---------
-    input_paths : список путей к временным .wav файлам в порядке воспроизведения
-    output_path : путь к итоговому .wav файлу
+    Parameters
+    ----------
+    input_paths : list of paths to temporary .wav files in playback order
+    output_path : path to the final .wav file
     """
     if not input_paths:
-        raise ValueError("merge_wav_files: список файлов пуст")
+        raise ValueError("merge_wav_files: list of files is empty")
 
     with wave.open(input_paths[0], "rb") as first:
         params = first.getparams()  # namedtuple: nchannels, sampwidth, framerate, ...
@@ -181,7 +211,7 @@ def merge_wav_files(input_paths: List[str], output_path: str) -> None:
                         src.getsampwidth() != params.sampwidth or
                         src.getframerate() != params.framerate):
                     log.warning(
-                        "Параметры файла %s не совпадают с эталоном — пропускаем",
+                        "Parameters of file %s do not match the template — skipping",
                         path,
                     )
                     continue
@@ -189,21 +219,20 @@ def merge_wav_files(input_paths: List[str], output_path: str) -> None:
 
 
 # ===========================================================================
-# Основной класс приложения
+# Main class of the application
 # ===========================================================================
 
 class VoiceAssistant:
     """
-    Оркестрирует весь жизненный цикл голосового ассистента:
-      1. Инициализация и прогрев всех движков.
-      2. Главный цикл прослушивания.
-      3. Стриминговый конвейер LLM → TTS → Player с параллельными воркерами.
-      4. Обработка прерываний (человек заговорил во время ответа).
-      5. Сохранение результата в семантический кэш.
+    Orchestrates the entire lifecycle of the voice assistant:
+      1. Initialization and warming up all engines.
+      2. Main listening loop.
+      3. Streaming pipeline LLM → TTS → Player with parallel workers.
+      4. Interrupt handling (person speaks while the assistant is responding).
+      5. Saving the result to the semantic cache.
     """
 
     def __init__(self) -> None:
-        # --- Движки ---
         from audio_io import SharedRobotState, AudioConfig
         self.shared_state = SharedRobotState()
 
@@ -212,15 +241,16 @@ class VoiceAssistant:
         local_mode = (AUDIO_MODE == "local")
         self.listener = AudioListener(self.shared_state, config=cfg, local_mode=local_mode)
         self.player = LocalAudioPlayer(self.shared_state) if local_mode else AudioPlayer(self.shared_state)
-        log.info("🔊 Аудио-режим: %s", "ЛОКАЛЬНЫЙ (микрофон/динамики ноутбука)" if local_mode else "G1 (сеть робота)")
+        log.info("Audio mode: %s", "LOCAL (microphone/speakers of the laptop)" if local_mode else "G1 (robot network)")
 
         self.is_awake = not USE_TRIGGERS
         self.is_analiz = False
+        self.uncensored_mode = False
 
-        # STTEngine рассчитан на GPU (см. его докстринг: "device — строго
-        # cuda", "compute_type — строго int8_float16"). 
-        # Определяем доступность CUDA автоматически, с безопасным откатом
-        # на CPU для отладки на ноутбуке без GPU (VOICE_ENGINE_AUDIO=local).
+        # STTEngine is designed for GPU (see its docstring: "device — strictly
+        # cuda", "compute_type — strictly int8_float16"). 
+        # We automatically detect CUDA availability, with a safe fallback
+        # to CPU for debugging on a laptop without a GPU (VOICE_ENGINE_AUDIO=local).
         try:
             import torch
             stt_use_cuda = torch.cuda.is_available()
@@ -232,10 +262,10 @@ class VoiceAssistant:
         else:
             stt_device, stt_compute_type = "cpu", "int8"
             log.warning(
-                "CUDA недоступна — STTEngine запускается на CPU (int8). "
-                "На реальном роботе G1 это заметно медленнее, чем cuda/"
-                "int8_float16, и не соответствует требованию быстрой речи. "
-                "Проверьте установку CUDA-версии PyTorch/faster-whisper."
+                "CUDA unavailable — STTEngine runs on CPU (int8). "
+                "On the real robot G1 this is noticeably slower than cuda/"
+                "int8_float16, and does not meet the requirement for fast speech. "
+                "Check the installation of the CUDA version of PyTorch/faster-whisper."
             )
         whisper_model = os.environ.get("VOICE_ENGINE_WHISPER_MODEL", "").strip()
         if not whisper_model:
@@ -250,9 +280,9 @@ class VoiceAssistant:
         if not whisper_model:
             whisper_model = "small"
             log.warning(
-                "Локальная faster-whisper модель не найдена; model_size='small' "
-                "может попытаться использовать интернет/кэш HuggingFace. Для "
-                "полностью офлайн-режима задайте VOICE_ENGINE_WHISPER_MODEL."
+                "Local faster-whisper model not found; model_size='small' "
+                "may attempt to use internet/cache HuggingFace. For "
+                "fully offline mode, set VOICE_ENGINE_WHISPER_MODEL."
             )
 
         self.stt = STTEngine(
@@ -264,10 +294,12 @@ class VoiceAssistant:
         self.cache = SemanticCache(
             index_path=PROJECT_DIR / "semantic_cache_index.faiss",
             mapping_path=PROJECT_DIR / "semantic_cache_mapping.pkl",
+            similarity_threshold=0.8,
         )
         self.kb_cache = SemanticCache(
             index_path=PROJECT_DIR / "kb_index.faiss",
             mapping_path=PROJECT_DIR / "kb_mapping.pkl",
+            similarity_threshold=0.8,
         )
         
         llm_model_path = os.environ.get(
@@ -278,47 +310,49 @@ class VoiceAssistant:
             model_path=llm_model_path,
             enable_context=ENABLE_CONTEXT,
             max_history_turns=MAX_HISTORY_TURNS,
+            n_gpu_layers=-1,
         )
         self.tts = TTSEngine(
-            warmup_on_init=False,   # прогрев будет через _warmup_all
+            warmup_on_init=False,   # warmup will be done in _warmup_all
             network_interface="eth0",
         )
         self.tts.validate_languages(self.stt.supported_tts_languages())
         self.gestures = G1GestureController(enabled=ENABLE_GESTURES, log=log)
 
-        # --- Пул потоков для блокирующих ML-операций ---
-        # Все вызовы model.transcribe(), model.generate(), model.synthesize()
-        # выполняются через loop.run_in_executor(self.executor, ...) —
-        # это позволяет event loop не зависать на тяжёлых вычислениях.
+        # --- Pool thead for blocking ML operations ---
+        # All calls to model.transcribe(), model.generate(), model.synthesize()
+        # are executed through loop.run_in_executor(self.executor, ...) —
+        # this allows the event loop not to hang on heavy computations.
         self.executor = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
 
-        # --- Флаг прерывания ---
-        # Устанавливается в True, когда детектор голоса фиксирует речь
-        # пользователя ВО ВРЕМЯ ответа робота. Воркеры проверяют этот флаг
-        # в каждой итерации своего цикла.
+        # --- Interrupt Flag ---
+        # Set to True when the voice detector detects user speech
+        # during the robot's response. Workers check this flag
+        # in each iteration of their loop.
         self._interrupted = threading.Event()
         self._running = False
+        self.operator_queue = asyncio.Queue()
 
         CACHE_WAV_DIR.mkdir(parents=True, exist_ok=True)
         CACHE_ANALYZ_WAV_DIR.mkdir(parents=True, exist_ok=True)
         KB_CACHE_WAV_DIR.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------------------------------------------------
-    # Инициализация и прогрев
+    # Initialization and Warmup
     # -----------------------------------------------------------------------
 
     async def _warmup_all(self) -> None:
         """
-        Прогрев ML-движков выполняется последовательно.
+        Warmup of ML engines is performed sequentially.
 
-        На Jetson параллельный прогрев CTranslate2/Whisper и TTS может
-        зависать на CUDA/runtime блокировках. Последовательный прогрев
-        занимает на несколько секунд больше при старте, зато не может
-        повесить запуск и не влияет на SLA после конца фразы.
+        On Jetson, parallel warmup of CTranslate2/Whisper and TTS may
+        hang on CUDA/runtime locks. Sequential warmup
+        takes a few seconds longer at startup, but cannot
+        hang the launch and does not affect SLA after the end of the phrase.
         """
         loop = asyncio.get_event_loop()
 
-        log.info("--> Прогрев движков...")
+        log.info("--> Warmup of engines...")
 
         warmups = (
             ("STT", self.stt.warmup, 20.0),
@@ -329,25 +363,25 @@ class VoiceAssistant:
             start = time.perf_counter()
             try:
                 await asyncio.wait_for(loop.run_in_executor(self.executor, fn), timeout=timeout_s)
-                log.info("--> Warmup %s завершён за %.2f с", name, time.perf_counter() - start)
+                log.info("--> Warmup %s completed in %.2f s", name, time.perf_counter() - start)
             except asyncio.TimeoutError:
-                log.error("Warmup %s превысил %.1f с — продолжаю запуск без ожидания", name, timeout_s)
+                log.error("Warmup %s exceeded %.1f s — continuing startup without waiting", name, timeout_s)
             except Exception as exc:
-                log.error("Warmup %s ошибка: %s — продолжаю запуск", name, exc)
+                log.error("Warmup %s error: %s — continuing startup", name, exc)
 
-        log.info("--> Все движки готовы к работе")
+        log.info("--> All engines are ready for work")
 
     # -----------------------------------------------------------------------
-    # Вспомогательные async-обёртки над блокирующими вызовами
+    # Helper async wrappers around blocking calls
     # -----------------------------------------------------------------------
 
     async def _run_stt(self, audio_data) -> "tuple":
         """
-        Транскрибирует аудио в текст в отдельном потоке.
+        Transcribes audio to text in a separate thread. 
 
-        Возвращает Tuple[str, str] = (текст, код_языка_для_xtts) — как
-        STTEngine.transcribe(). audio_data — numpy.ndarray (float32, mono,
-        16kHz), как отдаёт AudioListener.listen_for_phrase(), а не bytes.
+        Returns a Tuple[str, str] = (text, language_code_for_xtts) — just like
+        STTEngine.transcribe(). audio_data is a numpy.ndarray (float32, mono,
+        16kHz)—the format returned by AudioListener.listen_for_phrase()—rather than bytes.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -371,7 +405,7 @@ class VoiceAssistant:
         return tmp_path
 
     async def _run_cache_search(self, text: str, lang_code: str):
-        """Ищет ответ в семантическом кэше."""
+        """Searches for an answer in the semantic cache."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self.executor,
@@ -381,7 +415,7 @@ class VoiceAssistant:
         )
 
     async def _run_cache_put(self, query: str, answer: str, wav_path: str, lang_code: str) -> None:
-        """Сохраняет пару (запрос, ответ, wav) в кэш."""
+        """Saves a (query, answer, wav) pair to the cache."""
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             self.executor,
@@ -401,7 +435,7 @@ class VoiceAssistant:
         )
 
     # -----------------------------------------------------------------------
-    # Worker-1: генерация аудио (LLM + TTS)
+    # Worker-1: audio generation (LLM + TTS)
     # -----------------------------------------------------------------------
 
     async def _worker_tts(
@@ -412,36 +446,37 @@ class VoiceAssistant:
         collected_sentences: List[str],
         custom_generator = None,
         detected_gestures: List[str] = None,
+        uncensored: bool = False,
     ) -> None:
         """
-        Worker-1: «Производитель» (Producer) в схеме Producer-Consumer.
+        Worker-1: “Producer” in the Producer-Consumer scheme. 
 
-        Логика:
-          1. Получает от LLMEngine поток предложений (sync-генератор,
-             запускаемый в executor чтобы не блокировать event loop).
-          2. Каждое предложение отправляет в TTS → получает wav_path.
-          3. Кладёт wav_path в asyncio.Queue (неограниченная очередь,
-             т.к. воркер-плеер читает быстрее, чем TTS генерирует).
-          4. По завершении кладёт sentinel-объект (_QUEUE_SENTINEL),
-             чтобы Worker-2 знал, что больше файлов не будет.
-          5. При установке флага _interrupted немедленно прекращает работу
-             и сигнализирует Worker-2 через sentinel.
+        Logic: 
+        1. Receives a stream of proposals from LLMEngine (sync generator, 
+        launched in the executor so as not to block the event loop). 
+        2. Each sentence is sent to TTS → receives wav_path. 
+        3. Puts wav_path in asyncio.Queue (unlimited queue, 
+        because worker player reads faster than TTS generates). 
+        4. Upon completion, places a sentinel object (_QUEUE_SENTINEL), 
+        so that Worker-2 knows that there will be no more files. 
+        5. When the _interrupted flag is set, it stops working immediately 
+        and signals Worker-2 via sentinel. 
 
-        Параметры
-        ---------
-        text              : транскрибированный запрос пользователя
-        wav_queue         : asyncio.Queue для передачи wav_path → Worker-2
-        collected_sentences : список для накопления предложений (нужен для
-                             финального слияния wav и сохранения в кэш)
+        Options 
+        --------- 
+        text : transcribed user request 
+        wav_queue : asyncio.Queue to pass wav_path → Worker-2 
+        collected_sentences : list for collecting sentences (needed for 
+        final merging wav and saving to cache)
         """
         loop = asyncio.get_event_loop()
 
         try:
 
-            gen = custom_generator if custom_generator is not None else self.llm.generate_stream(text, lang_code)
+            gen = custom_generator if custom_generator is not None else self.llm.generate_stream(text, lang_code, uncensored=uncensored)
 
             while True:
-                # --- Проверка прерывания ---
+                # --- Interrupt check ---
                 if self._interrupted.is_set():
                     log.info("⚡ Worker-TTS: прерывание обнаружено, останавливаемся")
                     break
@@ -460,7 +495,7 @@ class VoiceAssistant:
                 if not sentence:
                     continue
 
-                # --- ФИЛЬТР АРТЕФАКТОВ ДЛЯ XTTS ---
+                # --- Artifact Filter for XTTS ---
                 sentence = re.sub(r'\.{2,}', ',', sentence)
                 sentence = re.sub(r'[*_~"«»]', '', sentence)
 
@@ -468,22 +503,19 @@ class VoiceAssistant:
                     sentence = sentence.replace('。', '.').replace('！', '!').replace('？', '?').replace('，', ',')
                     sentence = re.sub(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]', '', sentence)
 
-                # Перехват тегов жестикуляции 
-                gesture_match = re.search(r'\[жест:?\s*([^\]]+)\]', sentence, flags=re.IGNORECASE)
+                # --- Intercept gesture tags ---
+                gesture_match = GESTURE_REGEX.search(sentence)
                 g_name_to_pass = None
-                
-                if gesture_match:
-                    raw_g_name = gesture_match.group(1).strip().lower()
-                    g_name = raw_g_name.translate(str.maketrans("осаехр", "osacxp"))
-                    
-                    g_name_to_pass = g_name 
-                    
-                    if detected_gestures is not None and not detected_gestures:
-                        detected_gestures.append(g_name) 
-                        
-                    sentence = sentence.replace(gesture_match.group(0), "")
 
-                sentence = sentence.strip()
+                if gesture_match:
+                  raw_g_name = gesture_match.group(1).strip()
+                  g_name = normalize_gesture_name(raw_g_name)
+                  g_name_to_pass = g_name
+
+                  if detected_gestures is not None and not detected_gestures:
+                    detected_gestures.append(g_name)
+
+                sentence = GESTURE_REGEX.sub('', sentence).strip()
                 if not sentence:
                     continue
                 # ----------------------------------
@@ -508,14 +540,14 @@ class VoiceAssistant:
             log.exception("Worker-TTS: необработанное исключение: %s", exc)
 
         finally:
-            # --- Отправляем sentinel в любом случае ---
-            # Это КРИТИЧНО: Worker-2 ждёт sentinel, чтобы выйти из своего цикла.
-            # Без sentinel Worker-2 зависнет на queue.get() навсегда.
+            # --- Send the sentinel regardless ---
+            # This is CRITICAL: Worker-2 is waiting for the sentinel to exit its loop. 
+            # Without the sentinel, Worker-2 will hang on queue.get() forever.
             await wav_queue.put(_QUEUE_SENTINEL)
             log.debug("Worker-TTS: sentinel отправлен в очередь")
 
     # -----------------------------------------------------------------------
-    # Worker-2: воспроизведение аудио
+    # Worker-2: audio playback
     # -----------------------------------------------------------------------
 
     async def _worker_player(
@@ -524,33 +556,33 @@ class VoiceAssistant:
         played_wavs: List[str],
     ) -> None:
         """
-        Worker-2: «Потребитель» (Consumer) в схеме Producer-Consumer.
+        Worker-2: The "Consumer" in the Producer-Consumer pattern. 
 
-        Логика:
-          1. Бесконечно читает из asyncio.Queue.
-          2. Если получил _QUEUE_SENTINEL — выходит из цикла (поток завершён).
-          3. Если получил путь к wav — немедленно воспроизводит его.
-          4. Сохраняет путь в played_wavs для последующего слияния.
-          5. При установке флага _interrupted останавливает воспроизведение
-             и выходит, НЕ дожидаясь sentinel
-             (sentinel всё равно придёт из finally Worker-1).
+        Logic:
+        1. Continuously reads from the asyncio.Queue. 
+        2. If it receives _QUEUE_SENTINEL, it exits the loop (thread/task complete). 
+        3. If it receives a .wav path, it plays it immediately. 
+        4. Stores the path in played_wavs for subsequent merging. 
+        5. If the _interrupted flag is set, it stops playback
+        and exits without waiting for the sentinel
+        (the sentinel will arrive anyway from Worker-1's finally block). 
 
-        Ключевые свойства:
-          - Worker-2 запускается параллельно с Worker-1 через asyncio.gather().
-          - Пока Worker-1 синтезирует второй wav, Worker-2 уже играет первый.
-          - queue.get() — корутина, которая «паркует» Worker-2 без блокировки
-            event loop, пока в очереди нет данных.
+        Key characteristics:
+        - Worker-2 runs in parallel with Worker-1 via asyncio.gather(). 
+        - While Worker-1 is synthesizing the second .wav, Worker-2 is already playing the first. 
+        - queue.get() is a coroutine that "parks" Worker-2 without blocking
+        the event loop while the queue is empty. 
 
-        Параметры
-        ---------
-        wav_queue   : asyncio.Queue, из которой читаем wav_path или sentinel
-        played_wavs : список для накопления путей (для финального merge)
+        Parameters
+        ----------
+        wav_queue   : asyncio.Queue from which wav_path or sentinel is read
+        played_wavs : list for accumulating paths (for the final merge)
         """
         try:
             while True:
-                # --- Проверка прерывания ДО чтения из очереди ---
+                # --- Interrupt check --- 
                 if self._interrupted.is_set():
-                    log.info("--> Worker-Player: прерывание, прекращаем воспроизведение")
+                    log.info("--> Worker-Player: interruption, stopping playback")
                     _drain_queue(wav_queue)
                     break
 
@@ -559,9 +591,9 @@ class VoiceAssistant:
                 except asyncio.TimeoutError:
                     continue
 
-                # --- Проверяем: это sentinel или wav_path? ---
+                # --- Checking: is it sentinel or wav_path ---
                 if item is _QUEUE_SENTINEL:
-                    log.debug("Worker-Player: получен sentinel, завершаем цикл")
+                    log.debug("Worker-Player: Sentinel received, terminating the loop.")
                     wav_queue.task_done()
                     break
 
@@ -570,7 +602,7 @@ class VoiceAssistant:
                 if g_name:
                     self.gestures.start(g_name) 
                 
-                log.info("--> Воспроизводим: %s", wav_path)
+                log.info("--> Playing: %s", wav_path)
                 played_wavs.append(wav_path)
 
                 try:
@@ -588,7 +620,7 @@ class VoiceAssistant:
             log.exception("Worker-Player: необработанное исключение: %s", exc)
 
     # -----------------------------------------------------------------------
-    # Детектор прерывания (запускается параллельно с конвейером)
+    # Interrupt detector (runs in parallel with the pipeline)
     # -----------------------------------------------------------------------
 
     async def _interruption_watchdog(
@@ -596,29 +628,29 @@ class VoiceAssistant:
         stop_event: asyncio.Event,
     ) -> None:
         """
-        Параллельная корутина-«сторож», которая слушает микрофон во время
-        ответа робота и устанавливает _interrupted при обнаружении голоса.
+        A parallel "watchdog" coroutine that listens to the microphone while
+        the robot is responding and sets `_interrupted` upon detecting a voice. 
 
-        Использует AudioListener.check_interrupt() — облегчённый метод,
-        который возвращает True как только простой энергетический детектор
-        фиксирует устойчивую речь, без полной записи utterance.
+        It uses `AudioListener.check_interrupt()`—a lightweight method
+        that returns `True` as soon as a simple energy detector
+        registers sustained speech, without fully recording the utterance. 
 
-        ВАЖНО: раньше здесь вызывался listen_for_phrase() — тот же метод,
-        что и в основном цикле прослушивания. Но listen_for_phrase()
-        специально ставит захват на паузу, пока self.state.is_speaking
-        (робот говорит) — то есть ИМЕННО в то время, когда должен работать
-        watchdog. Из-за этого прерывание никогда не могло сработать.
-        check_interrupt() — отдельный метод, который читает микрофон именно
-        во время ответа робота (подробности и оговорки см. в audio_io.py).
+        IMPORTANT: Previously, `listen_for_phrase()` was called here—the same method
+        used in the main listening loop. However, `listen_for_phrase()`
+        specifically pauses capture while `self.state.is_speaking` is true
+        (i.e., while the robot is speaking)—which is precisely when the
+        watchdog needs to be active. Consequently, the interruption mechanism
+        never triggered. `check_interrupt()` is a separate method that reads
+        the microphone specifically during the robot's response (see
+        `audio_io.py` for details and caveats). 
 
-        stop_event устанавливается основной корутиной после завершения
-        конвейера, чтобы сторож не работал вечно.
+        The `stop_event` is set by the main coroutine after the pipeline
+        completes, ensuring the watchdog does not run indefinitely.
         """
         loop = asyncio.get_event_loop()
 
         try:
             while not stop_event.is_set():
-                # Проверяем наличие голоса (неблокирующий poll, ~50 мс)
                 detected = await loop.run_in_executor(
                     self.executor,
                     self.listener.check_interrupt,
@@ -629,59 +661,88 @@ class VoiceAssistant:
                     self._interrupted.set()
                     break
 
-                # Небольшая пауза, чтобы не сжигать CPU
                 await asyncio.sleep(0.05)
 
         except asyncio.CancelledError:
             pass
 
     # -----------------------------------------------------------------------
-    # Стриминговый конвейер (кэш-промах)
+    # Operator server (Wizard of Oz)
+    # -----------------------------------------------------------------------
+    async def _operator_handler(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        import json
+        
+        try:
+            data = await reader.readline()
+            if not data:
+                return
+                
+            payload = json.loads(data.decode('utf-8').strip())
+            text = payload.get("text", "").strip()
+            lang = payload.get("lang", "ru").strip()
+        except json.JSONDecodeError as exc:
+            log.error("Failed to parse operator JSON: %s", exc)
+            text = ""
+            lang = "ru"
+        
+        if text:
+            if text.lower() == "/stop":
+                log.info("--> OPERATOR: Forced stop of current speech")
+                self._interrupted.set()
+            else:
+                log.info("--> OPERATOR: Phrase added to queue (%s): «%s»", lang, text)
+                await self.operator_queue.put({"text": text, "lang": lang})
+                
+        writer.close()
+        await writer.wait_closed()
+
+    # -----------------------------------------------------------------------
+    # Streaming pipeline (cache miss)
     # -----------------------------------------------------------------------
 
-    async def _run_streaming_pipeline(self, query: str, lang_code: str = "ru", custom_generator = None) -> None:
+    async def _run_streaming_pipeline(self, query: str, lang_code: str = "ru", custom_generator = None, uncensored: bool = False) -> None:
         """
-        Запускает двухворкерный стриминговый конвейер для генерации ответа.
+        Launches a two-worker streaming pipeline to generate the response. 
 
-        Схема работы очереди
-        --------------------
+        Queue workflow
+        --------------
 
-                    wav_queue (asyncio.Queue)
-                         │
+        wav_queue (asyncio.Queue)
+            │
         Worker-TTS ──put()──►──get()── Worker-Player
-         (Producer)                      (Consumer)
-              │                              │
-          TTS.synthesize()            AudioPlayer.play()
-              │                              │
-          wav_path                     played_wavs[]
+        (Producer)                      (Consumer)
+            │                              │
+        TTS.synthesize()            AudioPlayer.play()
+            │                              │
+        wav_path                     played_wavs[]
 
-        Sentinel-паттерн:
-          Worker-TTS кладёт _QUEUE_SENTINEL после последнего wav
-          (или при прерывании/ошибке — из блока finally).
-          Worker-Player при получении sentinel выходит из цикла.
-          Это гарантирует, что Worker-Player ВСЕГДА завершится.
+        Sentinel pattern:
+        Worker-TTS puts _QUEUE_SENTINEL after the last wav
+        (or upon interruption/error—from the finally block). 
+        Worker-Player exits the loop upon receiving the sentinel. 
+        This guarantees that Worker-Player ALWAYS terminates. 
 
-        После завершения обоих воркеров:
-          - Проверяем, было ли прерывание.
-          - Если нет — склеиваем все wav в один финальный файл.
-          - Сохраняем в SemanticCache.
+        After both workers finish:
+        - Check if an interruption occurred. 
+        - If not, concatenate all wavs into a single final file. 
+        - Save to SemanticCache.
         """
         self._interrupted.clear()
 
-        collected_sentences: List[str] = []  # Worker-TTS пишет
-        played_wavs: List[str] = []          # Worker-Player пишет
+        collected_sentences: List[str] = [] 
+        played_wavs: List[str] = []        
         detected_gestures: List[str] = []
 
-        # asyncio.Queue — основной канал связи между воркерами.
-        # maxsize=0 означает неограниченный размер. Это безопасно, т.к.:
-        #   а) TTS медленнее плеера (не накопится много элементов)
-        #   б) Мы хотим, чтобы TTS не ждал плеера (полный оверлап)
+        # asyncio.Queue — the primary communication channel between workers. 
+        # maxsize=0 means unlimited size. This is safe because:
+        #   a) TTS is slower than the player (items won't pile up)
+        #   b) We want TTS not to wait for the player (full overlap)
         wav_queue: asyncio.Queue = asyncio.Queue()
 
         watchdog_stop = asyncio.Event()
  
         tts_task = asyncio.ensure_future(
-            self._worker_tts(query, lang_code, wav_queue, collected_sentences, custom_generator, detected_gestures)
+            self._worker_tts(query, lang_code, wav_queue, collected_sentences, custom_generator, detected_gestures, uncensored)
         )
         
         watchdog_task = None
@@ -690,8 +751,8 @@ class VoiceAssistant:
                 self._interruption_watchdog(watchdog_stop)
             )
 
-        # Если озвучка выключена - запускаем dummy_player, который просто забирает wav из очереди,
-        # если включена - оригинальный player_task
+        # If audio output is disabled, we launch dummy_player, which simply pulls WAVs from the queue;
+        # if enabled, we launch the original player_task.
         if ENABLE_PLAYBACK:
             player_task = asyncio.ensure_future(self._worker_player(wav_queue, played_wavs))
         else:
@@ -724,7 +785,7 @@ class VoiceAssistant:
                 watchdog_task.cancel()
                 await asyncio.gather(watchdog_task, return_exceptions=True)
 
-        # --- Постобработка ---
+        # --- Post-processing ---
 
         if self._interrupted.is_set():
             log.info("Конвейер прерван — пропускаем сохранение в кэш")
@@ -735,7 +796,7 @@ class VoiceAssistant:
             log.warning("Конвейер завершён, но wav-файлов нет — ничего не сохраняем")
             return
 
-        # --- Слияние wav-файлов ---
+        # --- Merging WAV files ---
         full_answer = " ".join(collected_sentences)
         
         cache_text = full_answer
@@ -755,7 +816,7 @@ class VoiceAssistant:
             _cleanup_temp_wavs(played_wavs)
             return
 
-        # --- Сохранение в кэш ---
+        # --- Caching ---
         if self.is_analiz:
             log.info("Анализ не сохраняем в кэш")
             self.is_analiz = False
@@ -777,35 +838,35 @@ class VoiceAssistant:
         _cleanup_temp_wavs(played_wavs)
 
     # -----------------------------------------------------------------------
-    # Главный цикл
+    # Main loop
     # -----------------------------------------------------------------------
 
     async def run(self) -> None:
         """
-        Главный цикл голосового ассистента.
+        Voice assistant main loop. 
 
-        Порядок работы в каждой итерации:
-          1. listen()       — блокирующая запись utterance
-          2. STT            — транскрипция
-          3. cache.search() — поиск в семантическом кэше
-          4a. кэш-хит  → play(cached_wav)
-          4b. кэш-промах → _run_streaming_pipeline()
+        Workflow for each iteration:
+        1. listen()       — blocking recording of the utterance
+        2. STT            — transcription
+        3. cache.search() — semantic cache lookup
+        4a. cache hit    → play(cached_wav)
+        4b. cache miss   → _run_streaming_pipeline()
         """
         await self._warmup_all()
 
         self._running = True
         self.listener.start()
-        log.info("--> Ассистент запущен. Нажмите Ctrl+C для выхода.")
+        log.info("--> Assistant started. Press Ctrl+C to exit..")
 
         loop = asyncio.get_event_loop()
 
         # =========================================================
-        # --- Стартовая фраза Кузьмича ---
+        # --- Kuzmich's opening phrase ---
         # =========================================================
         startup_path = str(PROJECT_DIR / "startup.wav")
         if not os.path.exists(startup_path):
-            log.info("Синтезирую стартовую фразу...")
-            startup_text = "Ну всё, лампы прогрелись, сервоприводы смазаны. Чего стоим? Я готов, говорите, только четко и не бормочите."
+            log.info("Synthesizing the starting phrase...")
+            startup_text = "Ну всё, лампы прогрелись, моторы смазаны. Чего стоим? Я готов, говорите, только четко и не бормочите."
             try:
                 await loop.run_in_executor(
                     self.executor,
@@ -815,84 +876,272 @@ class VoiceAssistant:
                     startup_path
                 )
             except Exception as exc:
-                log.error("Ошибка синтеза стартовой фразы: %s", exc)
+                log.error("Error synthesizing the starting phrase: %s", exc)
 
         if os.path.exists(startup_path):
-            log.info("Проигрываю стартовую речь.")
+            log.info("Playing the starting phrase...")
             try:
                 await self._play(startup_path)
             except Exception as exc:
-                log.error("Ошибка воспроизведения стартовой фразы: %s", exc)
+                log.error("Error playing the starting phrase: %s", exc)
+
+        # =========================================================
+        # --- Kuzmich's scanning phrase ---
+        # =========================================================
+        scanning_path = str(PROJECT_DIR / "scanning.wav")
+        if not os.path.exists(scanning_path):
+            log.info("Synthesizing the scanning phrase...")
+            scanning_text = "Так, минуточку, навожу резкость на своих старых оптических датчиках... Сканирую обстановку!"
+            try:
+                await loop.run_in_executor(
+                    self.executor,
+                    self.tts.synthesize,
+                    scanning_text,
+                    "ru",
+                    scanning_path
+                )
+            except Exception as exc:
+                log.error("Error synthesizing the scanning phrase: %s", exc)
         # =========================================================
 
-        try:
-            while self._running:
-                # ── Шаг 1: Запись аудио ──────────────────────────────────
-                log.info("--> Слушаю...")
+        operator_server = await asyncio.start_server(self._operator_handler, '127.0.0.1', 9999)
+        asyncio.create_task(operator_server.serve_forever())
+        log.info("--> The operator console server is running on port 9999")
 
-                try:
-                    audio_data: Optional[bytes] = await loop.run_in_executor(
-                        self.executor,
-                        self.listener.listen_for_phrase,
+        try:
+            queue_task = asyncio.create_task(self.operator_queue.get())
+            listen_task = None
+
+            while self._running:
+                # ── Step 1: Competitive Waiting (Microphone OR Remote Control) ────────────
+                if listen_task is None or listen_task.done():
+                    log.info("--> Listening...")
+                    listen_task = loop.run_in_executor(
+                        self.executor, self.listener.listen_for_phrase
                     )
+
+                if queue_task.done():
+                    queue_task = asyncio.create_task(self.operator_queue.get())
+                    
+                done, pending = await asyncio.wait(
+                    [listen_task, queue_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # ── Scenario A: Remote control button pressed ──
+                if queue_task in done:
+                    op_data = queue_task.result()
+                    op_text, op_lang = op_data["text"], op_data["lang"]
+                    
+                    log.info("--> Operator phrase voiceover (%s): «%s»", op_lang, op_text)
+                    # if ENABLE_CONTEXT:
+                    #     self.llm.chat_history.append({"role": "assistant", "content": op_text})
+                    
+                    def op_gen(text=op_text): yield text
+                    try:
+                        self.is_analiz = True
+                        await self._run_streaming_pipeline("operator", op_lang, custom_generator=op_gen())
+                    except Exception as exc:
+                        log.error("Error synthesizing the operator phrase: %s", exc)
+                    
+                    continue
+
+                # ── Scenario B: Microphone triggered (someone said something) ──
+                try:
+                    audio_data = listen_task.result()
                 except Exception as exc:
-                    log.error("AudioListener ошибка: %s", exc)
+                    log.error("AudioListener error: %s", exc)
                     await asyncio.sleep(0.5)
                     continue
 
                 if audio_data is None or len(audio_data) == 0:
-                    log.debug("Аудио пустое — пропускаем")
+                    log.debug("Audio is empty — skipping")
                     continue
 
-                # ── Шаг 2: Speech-to-Text ────────────────────────────────
+                # ── Step 2: Speech-to-Text ────────────────────────────────
                 try:
                     text, lang_code = await self._run_stt(audio_data)
                 except Exception as exc:
-                    log.error("STT ошибка: %s", exc)
+                    log.error("STT error: %s", exc)
                     continue
 
                 if not text or not text.strip():
-                    log.debug("STT вернул пустую строку — пропускаем")
+                    log.debug("STT returned an empty string — skipping")
                     continue
 
                 query = text.strip()
 
-                # --- АНТИ-ГАЛЛЮЦИНАЦИИ WHISPER ---
+                # --- WHISPER ANTI-HALLUCINATIONS ---
                 query_lower = query.lower()
                 
                 hallucinations = [
                     "субтитры", "dima", "torzok", "продолжение следует",
-                    "amara", "редактор", "перевод", "озвучено", "смотреть до конца"
+                    "amara", "редактор", "перевод", "озвучено", "смотреть до конца",
+                    "obrigado", "gracias", 
                 ]
                 exact_hallucinations = [
-                    "okay", "mm-hmm", "yeah", "you", "thank you", "thanks", "окей", "да", "нет"
+                    "okay", "mm-hmm", "yeah", "you", "thank you.",
+                    "thank you", "thanks", "окей", "да", "нет", "gracias.", 
+                    "gracias", "obrigado.", "obrigado", "bye", "bye.", "i'm sorry", "i'm sorry.",
                 ]
                 
-                if any(h in query_lower for h in hallucinations) or query_lower in exact_hallucinations or len(query) < 3:
-                    log.info("Поймана галлюцинация Whisper: «%s» — игнорируем", query)
+                query_lower = query.lower()
+                valid_short_words = {"да", "нет", "ну", "ок", "ага", "yes", "no", "hi", "hey", "yo", "ok"} 
+
+                if (any(h in query_lower for h in hallucinations) or 
+                (query_lower in exact_hallucinations) or 
+                (len(query) < 3 and query_lower not in valid_short_words)):
+                    log.info("Picked up a Whisper hallucination: «%s» — ignoring", query)
                     continue
                 # ---------------------------------
 
-                log.info("--> Распознано (%s): «%s»", lang_code, query)
+                log.info("--> Recognized (%s): «%s»", lang_code, query)
 
-                 # ── Обработка триггеров ───────────────────
+                 # ── Trigger processing ───────────────────
 
                 clean_words = set(re.findall(r'\b\w+\b', query.lower()))
 
                 if USE_TRIGGERS:
+                    # ── Секретный протокол "Тётя Вася" ───────────────────
+                    query_lower_full = query.lower()
+                    
+                    if "тётя вася" in query_lower_full or "тетя вася" in query_lower_full:
+                        if not self.uncensored_mode:
+                            log.warning("--> 🔓 ПРОТОКОЛ 'ТЁТЯ ВАСЯ' АКТИВИРОВАН НАВСЕГДА!")
+                            self.uncensored_mode = True
+                            self.llm.clear_history()
+                        
+                        self.is_analiz = True
+                        
+                        query = re.sub(r'(?i)т[её]тя вася[, ]*', '', query).strip()
+                        if not query:
+                            query = "Скажи что-нибудь от души."
+                            
+                        try:
+                            await self._run_streaming_pipeline(query, "ru", uncensored=True)
+                        except Exception as exc:
+                            log.error("Ошибка в режиме Тётя Вася: %s", exc)
+                        
+                        continue
+                    # ── Отключение секретного протокола "Тётя Вася" ───────────────────
+                    disable_vasya_triggers = ["дядя вася", "отбой протокола"]
+                    if self.uncensored_mode and any(h in query_lower_full for h in disable_vasya_triggers):
+                        log.info("--> 🔒 ПРОТОКОЛ 'ТЁТЯ ВАСЯ' ОТКЛЮЧЕН. Возвращение Кузьмича.")
+                        self.uncensored_mode = False
+                        self.llm.clear_history()
+                        self.is_analiz = True
+                        
+                        def back_to_normal_gen():
+                            yield "[жест: facepalm] Ох, батюшки... Что это на меня нашло?"
+                            yield "Простите, магнитные бури, видимо. Я снова с вами!"
+                            
+                        try:
+                            await self._run_streaming_pipeline(query, "ru", custom_generator=back_to_normal_gen())
+                        except Exception as exc:
+                            log.error("Ошибка при отключении режима: %s", exc)
+                        continue
+                    # ────────────────────────────────────────────────────────
+
                     stop_words = [
                         "stop", "top", "стоп", "топ",
                     ]
                     if any(h in clean_words for h in stop_words):
-                        log.info("--> Команда СТОП. Переход в спящий режим.")
+                        log.info("--> Command STOP. Transitioning to sleep mode.")
                         self.llm.clear_history()
                         self.is_awake = False
                         continue
-                    if "привет" in clean_words:
-                        log.info("--> Команда ПРИВЕТ. Переход в активный режим.")
+                    hello_words = [
+                        "hello", "привет", "hi", "what's up",
+                    ]
+                    if any(h in clean_words for h in hello_words):
+                        log.info("--> Command HELLO. Transitioning to active mode.")
                         self.is_awake = True
-                    if "поздоровайся" in clean_words:
-                        log.info("--> Команда ПОЗДОРОВАЙСЯ. Запуск приветственной речи с жестами.")
+                        self.is_analiz = True 
+
+                        def greeting_gen():
+                            if lang_code == "en":
+                                yield "[жест: moet_glaza] Greetings, dear guest!"
+                                yield "How is your day going? I am glad to see you here!"
+                            else:
+                                yield "[жест: moet_glaza] Здравствуйте, уважаемый гость!"
+                                yield "Как проходит ваш день? Я рад видеть вас здесь!"
+
+                        try:
+                            await self._run_streaming_pipeline(query, lang_code, custom_generator=greeting_gen())
+                        except Exception as exc:
+                            log.error("Error occurred while playing the greeting: %s", exc)
+                        continue
+
+                    bye_words = [
+                        "пока", "bye", "goodbye", "прощай", "до встречи",
+                    ]
+                    if any(h in clean_words for h in bye_words):
+                        log.info("--> Command BYE. Starting greeting bye with gestures.")
+                        self.is_analiz = True 
+
+                        def greeting_gen():
+                            if lang_code == "en":
+                                yield "[жест: moet_glaza] Goodbye, dear guest!"
+                                yield "I wish you a wonderful time here!"
+                            else:
+                                yield "[жест: moet_glaza] До встречи, уважаемый гость!"
+                                yield "Желаю вам хорошего времяпрепровождения!"
+
+                        try:
+                            await self._run_streaming_pipeline(query, lang_code, custom_generator=greeting_gen())
+                        except Exception as exc:
+                            log.error("Error occurred while playing the greeting: %s", exc)
+                        continue
+
+                    heart_words = [
+                        "сделаем фото", "сделаем селфи", "сделаем сердечко", "сердечко вместе", "сердечко один",
+                        "make a photo", "make a selfie", "make a heart", "heart together", "heart one",
+                    ]
+                    if any(h in clean_words for h in heart_words):
+                        log.info("--> Command HEART. Starting greeting heart with gestures.")
+                        self.is_analiz = True 
+
+                        def greeting_gen():
+                            if lang_code == "en":
+                                yield "[жест: site_right_demo] Let's take a photo, dear guest!"
+                                yield "Please smile and complete my heart!"
+                            else:
+                                yield "[жест: site_right_demo] Давайте сделаем фото, уважаемый гость!"
+                                yield "Пожалуйста, улыбнитесь и дополните мое сердечко!"
+
+                        try:
+                            await self._run_streaming_pipeline(query, lang_code, custom_generator=greeting_gen())
+                        except Exception as exc:
+                            log.error("Error occurred while playing the greeting: %s", exc)
+                        continue
+
+                    shakehands_words = [
+                        "поздоровайся", "пожми руку", "handshake", "протяни руку", "рукопожатие", 
+                        "shakehands", "shake", "shakehand", "hand-check", "вожми руку", 
+                    ]
+                    if any(h in clean_words for h in shakehands_words):
+                        log.info("--> Command HANDSHAKE. Starting greeting handshake with gestures.")
+                        self.is_analiz = True 
+
+                        def greeting_gen():
+                            if lang_code == "en":
+                                yield "[жест: shakehands] Greetings, dear guest!"
+                                yield "My name is Kuzmich, and what is yours?"
+                            else:
+                                yield "[жест: shakehands] Здравствуй, уважаемый гость!"
+                                yield "Меня зовут Кузьмич, а тебя как?"
+
+                        try:
+                            await self._run_streaming_pipeline(query, lang_code, custom_generator=greeting_gen())
+                        except Exception as exc:
+                            log.error("Error occurred while playing the greeting: %s", exc)
+                        continue
+                    comision_words = [
+                        "представься комиссии", "ставься комиссии", "поздоровайся с комиссией", "представься комиссии.", 
+                        "перед тобой комиссия", "здоровайся с комиссией", "тобой комиссия",
+                    ]
+                    if any(h in clean_words for h in comision_words):
+                        log.info("--> Command GREETING. Starting greeting speech with gestures.")
                         
                         self.is_analiz = True 
                         
@@ -909,12 +1158,12 @@ class VoiceAssistant:
                         try:
                             await self._run_streaming_pipeline(query, lang_code, custom_generator=greeting_gen())
                         except Exception as exc:
-                            log.error("Ошибка при воспроизведении приветствия: %s", exc)
+                            log.error("Error occurred while playing the greeting: %s", exc)
                             
                         continue                            
 
                 if not self.is_awake:
-                    log.debug("Спящий режим. Игнорирую: %s", query)
+                    log.debug("Sleep mode. Ignoring: %s", query)
                     continue
 
                 analyze_words = [
@@ -924,86 +1173,161 @@ class VoiceAssistant:
                 ]
                 if any(h in clean_words for h in analyze_words) and analyze_for_tts is not None:
                     self.is_analiz = True
-                    log.info("--> Запуск анализа сцены...")
+                    log.info("--> Launching scene analysis...")
+
+                    scanning_path = str(PROJECT_DIR / "scanning.wav")
+                    if os.path.exists(scanning_path):
+                        log.info("--> Playing scanning notification...")
+                        if ENABLE_GESTURES:
+                            self.gestures.start("self_prez_right")
+                            
+                        asyncio.create_task(self._play(scanning_path))
+
                     try:
                         out_path = await loop.run_in_executor(self.executor, analyze_for_tts)
                         with open(out_path, "r", encoding="utf-8") as f:
                             scene_desc = f.read().strip()
                         
                         query = f"Пользователь попросил анализ сцены. Данные с твоих камер: {scene_desc}. Кратко расскажи, что ты видишь, от своего лица."
-                        log.info("--> Зрение получено: %s", scene_desc)
+                        log.info("--> Vision data received: %s", scene_desc)
                     except Exception as exc:
-                        log.error("Ошибка VLM-анализа: %s", exc)
+                        log.error("Error in VLM analysis: %s", exc)
                         query = "Пользователь попросил анализ, но твоя камера не отвечает. Пошути на тему сломанных советских датчиков."
 
-                # ── Шаг 3: Поиск в семантических кэшах ───────────
+                # ── Step 3: Search in semantic caches ───────────
                 cache_result = None
+                is_kb_hit = False
 
-                # 1. Базу знаний (факты) проверяем ВСЕГДА, независимо от контекста диалога
-                try:
-                    cache_result = await loop.run_in_executor(self.executor, self.kb_cache.search, query, lang_code)
-                except Exception as exc:
-                    log.error("Ошибка поиска в kb_cache: %s", exc)
+                if self.uncensored_mode:
+                    log.info("Режим Тёти Васи: пропускаем поиск в кэше.")
+                    self.is_analiz = True
+                else:
+                    clean_query = re.sub(r'^[^\w\s]+|[^\w\s]+$', '', query).strip()
 
-                # 2. Обычный разговорный кэш проверяем, только если память пуста
-                if not cache_result and (not ENABLE_CONTEXT or not self.llm.chat_history):
                     try:
-                        cache_result = await self._run_cache_search(query, lang_code)
+                        cache_result = await loop.run_in_executor(
+                            self.executor, self.kb_cache.search, query, None
+                        )
+                        if not cache_result and clean_query != query:
+                            cache_result = await loop.run_in_executor(
+                                self.executor,
+                                self.kb_cache.search,
+                                clean_query,
+                                None,
+                            )
+                        if cache_result:
+                            is_kb_hit = True
                     except Exception as exc:
-                        log.error("SemanticCache ошибка поиска: %s", exc)
+                        log.error('Error searching in kb_cache: %s', exc)
 
-                if cache_result is not None and not self.is_analiz:
-                    cached_wav = cache_result.get("audio_path") if isinstance(cache_result, dict) else getattr(cache_result, "audio_path", cache_result)
-                    response_text = cache_result.get("response_text", "") if isinstance(cache_result, dict) else ""
+                    if not cache_result and (
+                        not ENABLE_CONTEXT or not self.llm.chat_history
+                    ):
+                        try:
+                            cache_result = await self._run_cache_search(
+                                query, lang_code
+                            )
+                        except Exception as exc:
+                            log.error('SemanticCache search error: %s', exc)
+
+                    if cache_result is not None and not self.is_analiz:
+                        cached_wav = (
+                            cache_result.get('audio_path')
+                            if isinstance(cache_result, dict)
+                            else getattr(cache_result, 'audio_path', cache_result)
+                        )
+                        response_text = (
+                            cache_result.get('response_text', '')
+                            if isinstance(cache_result, dict)
+                            else ''
+                        )
                     
-                    if cached_wav:
-                        if response_text:
-                            gesture_match = re.search(r'\[жест:?\s*([^\]]+)\]', response_text, flags=re.IGNORECASE)
-                            if gesture_match:
-                                raw_g_name = gesture_match.group(1).strip().lower()
-                                g_name = raw_g_name.translate(str.maketrans("осаехр", "osacxp"))
-                                self.gestures.start(g_name)
-                                
-                        log.info("Кэш-хит! Воспроизводим: %s", cached_wav)
+                        cached_lang = (
+                            cache_result.get('language')
+                            if isinstance(cache_result, dict)
+                            else getattr(cache_result, 'language', None)
+                        ) or "ru"
+
+                        if cached_lang != lang_code:
+                            log.info("Found an answer in the database for '%s', but the question was asked in '%s'. Translating....", cached_lang, lang_code)
+                        
+                            translation_prompt = (
+                                f"Гость задал вопрос: «{query}». "
+                                f"В нашей базе знаний есть точный ответ: «{response_text}». "
+                                f"Переведи и озвучь этот ответ гостю СТРОГО на языке '{lang_code}'. "
+                                f"Будь предельно вежлив, гостеприимен и обращайся к гостю уважительно. "
+                                f"ОБЯЗАТЕЛЬНО начни свой ответ с тега жеста в строгом формате [жест: ИМЯ]."
+                            )
+                        
+                            try:
+                                await self._run_streaming_pipeline(translation_prompt, lang_code)
+                            except Exception as exc:
+                                log.error("Error generating translation from the database: %s", exc)
+                            
+                            self.llm.clear_history()
+                            continue
+
+                        if cached_wav:
+                            if is_kb_hit:
+                                import random
+                                kb_gesture = random.choice([
+                                    "self_prez_left", 
+                                    "self_prez_right", 
+                                    "speaker_left", 
+                                    "speaker_right"
+                                ])
+                                if ENABLE_GESTURES:
+                                    self.gestures.start(kb_gesture)
+                                log.info('KB Cache hit! Selected random gesture: %s', kb_gesture)
+                            else:
+                                if response_text:
+                                    gesture_match = GESTURE_REGEX.search(response_text)
+                                    if gesture_match:
+                                        raw_g_name = gesture_match.group(1).strip()
+                                        g_name = normalize_gesture_name(raw_g_name)
+                                        if g_name and ENABLE_GESTURES:
+                                            self.gestures.start(g_name)
+
+                        log.info('Cache hit! Playing: %s', cached_wav)
                         try:
                             await self._play(cached_wav)
                         except Exception as exc:
-                            log.error("Ошибка воспроизведения кэша: %s", exc)
-                            
+                            log.error('Error playing cache: %s', exc)
+
                         self.llm.clear_history()
                         continue
 
-                # ── Шаг 4: Стриминговый конвейер (кэш-промах) ────────────
-                log.info("Кэш-промах, запускаем конвейер LLM→TTS→Player")
+                # ── Step 4: Streaming pipeline (cache miss) ────────────
+                log.info("Cache miss, launching LLM→TTS→Player pipeline")
 
                 try:
-                    await self._run_streaming_pipeline(query, lang_code)
+                    await self._run_streaming_pipeline(query, ("ru" if self.uncensored_mode else lang_code), uncensored=self.uncensored_mode)
                 except asyncio.CancelledError:
-                    log.info("Конвейер отменён")
+                    log.info("Pipeline cancelled")
                     raise
                 except Exception as exc:
-                    log.exception("Ошибка в стриминговом конвейере: %s", exc)
+                    log.exception("Error in streaming pipeline: %s", exc)
 
         except (KeyboardInterrupt, asyncio.CancelledError):
-            log.info("Получен сигнал завершения")
+            log.info("Signal received to stop")
         finally:
             self._running = False
             self.executor.shutdown(wait=False)
             self.listener.close()
-            log.info("Ассистент остановлен")
+            log.info("Assistant stopped")
 
 
 # ===========================================================================
-# Вспомогательные функции (модуль-уровень, не методы класса)
+# Helper functions (module-level, not class methods)
 # ===========================================================================
 
 def _safe_next(generator):
     """
-    Безопасный вызов next() для синхронного генератора.
+    Safely call next() on a synchronous generator. 
 
-    Возвращает следующее значение или None при StopIteration.
-    Используется в run_in_executor, т.к. StopIteration не может
-    нормально выйти из executor в Python 3.7+ (PEP 479).
+    Returns the next value, or None upon StopIteration. 
+    Used in run_in_executor, as StopIteration cannot
+    propagate out of the executor in Python 3.7+.
     """
     try:
         return next(generator)
@@ -1013,10 +1337,10 @@ def _safe_next(generator):
 
 def _drain_queue(queue: asyncio.Queue) -> None:
     """
-    Немедленно очищает asyncio.Queue без ожидания (non-blocking drain).
+    Immediately drains the asyncio.Queue without waiting (non-blocking drain). 
 
-    Вызывается при прерывании, чтобы «дренировать» оставшиеся wav-пути
-    и sentinel из очереди, не допустив утечки ресурсов.
+    Called upon interruption to "drain" remaining WAV paths
+    and the sentinel from the queue, preventing resource leaks.
     """
     while not queue.empty():
         try:
@@ -1028,41 +1352,41 @@ def _drain_queue(queue: asyncio.Queue) -> None:
 
 def _cleanup_temp_wavs(wav_paths: List[str]) -> None:
     """
-    Удаляет временные .wav файлы, созданные TTS для отдельных предложений.
-    Финальный склеенный файл НЕ удаляется (он сохранён в CACHE_WAV_DIR).
+    Deletes temporary .wav files created by TTS for individual sentences. 
+    The final concatenated file is NOT deleted (it is saved in CACHE_WAV_DIR).
     """
     for path in wav_paths:
         try:
             if os.path.exists(path):
                 os.remove(path)
-                log.debug("Удалён временный файл: %s", path)
+                log.debug("Deleted temporary file: %s", path)
         except OSError as exc:
-            log.warning("Не удалось удалить %s: %s", path, exc)
+            log.warning("Failed to delete %s: %s", path, exc)
 
 
 # ===========================================================================
-# Точка входа
+# Entry point
 # ===========================================================================
 
 def main() -> None:
     """
-    Точка входа. Создаёт event loop и запускает VoiceAssistant.
+    Entry point. Creates the event loop and starts the VoiceAssistant. 
 
-    Python 3.8 совместимость:
-      - asyncio.run() доступен с 3.7, используем его.
-      - asyncio.to_thread() — только 3.9+, поэтому везде используем
-        loop.run_in_executor() с явным ThreadPoolExecutor.
-      - В Python 3.8 на Windows по умолчанию используется
-        ProactorEventLoop (нужно для subprocesses), на Unix — SelectorEventLoop.
-        Для аудио это обычно не важно, но явно не задаём policy,
-        чтобы не ломать платформенные значения по умолчанию.
+    Python 3.8 compatibility:
+    - asyncio.run() is available since 3.7; we use it. 
+    - asyncio.to_thread() is 3.9+ only, so we use
+    loop.run_in_executor() with an explicit ThreadPoolExecutor throughout. 
+    - On Python 3.8, Windows defaults to ProactorEventLoop
+    (required for subprocesses), while Unix uses SelectorEventLoop. 
+    This usually doesn't matter for audio, but we do not explicitly set the policy
+    to avoid breaking platform-specific defaults.
     """
     assistant = VoiceAssistant()
 
     try:
         asyncio.run(assistant.run())
     except KeyboardInterrupt:
-        pass  # asyncio.run() сам обрабатывает Ctrl+C через CancelledError
+        pass
 
 
 if __name__ == "__main__":

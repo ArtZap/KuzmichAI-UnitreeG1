@@ -1,16 +1,15 @@
 """
 semantic_cache.py
 
-Модуль семантического кэша для мгновенных ответов на повторяющиеся вопросы
+Module for semantic caching of instant responses to repeated questions
 (Zero-latency responses).
 
-Использует:
-- sentence-transformers (paraphrase-multilingual-MiniLM-L12-v2) для эмбеддингов
-- faiss (CPU, IndexFlatIP) для поиска по косинусному сходству
+Uses:
+- sentence-transformers (paraphrase-multilingual-MiniLM-L12-v2) for embeddings
+- faiss (CPU, IndexFlatIP) for searching by cosine similarity
 
-ВАЖНО: для IndexFlatIP косинусное сходство корректно считается только если
-все векторы (и в индексе, и запросные) L2-нормализованы. Поэтому нормализация
-выполняется на каждом шаге: при добавлении и при поиске.
+IMPORTANT: For IndexFlatIP, cosine similarity is calculated correctly only if all vectors 
+(both in the index and query) are L2-normalized. Therefore, normalization is performed at each step: when adding and when searching.
 """
 
 from __future__ import annotations
@@ -34,21 +33,21 @@ logging.basicConfig(level=logging.INFO)
 
 class SemanticCache:
     """
-    Семантический кэш "вопрос -> готовый ответ (текст + аудио)".
+    Semantic cache for instant responses to repeated questions.
 
-    Хранилище состоит из двух частей:
-      1. FAISS-индекс (IndexFlatIP) с L2-нормализованными эмбеддингами.
-      2. Маппинг vector_id -> {'query_text', 'response_text', 'audio_path'}
-         (pickle или json на выбор).
+    The storage consists of two parts:
+      1. FAISS index (IndexFlatIP) with L2-normalized embeddings.
+      2. Mapping vector_id -> {'query_text', 'response_text', 'audio_path'}
+         (pickle or json at choice).
 
-    Пример:
+    Example usage:
         cache = SemanticCache(
             index_path="cache/index.faiss",
             mapping_path="cache/mapping.pkl",
         )
-        cache.add("Как дела?", "У меня всё хорошо!", "audio/ok.wav")
+        cache.add("How are you?", "I'm doing great!", "audio/ok.wav")
 
-        hit = cache.search("как у тебя дела")
+        hit = cache.search("how are you doing")
         if hit:
             print(hit["response_text"], hit["audio_path"])
     """
@@ -76,10 +75,10 @@ class SemanticCache:
         model_ref = self._resolve_model_ref(model_name)
         
         if not hasattr(SemanticCache, "_shared_model"):
-            logger.info("Загрузка модели эмбеддингов: %s", model_ref)
+            logger.info("Loading embedding model: %s", model_ref)
             SemanticCache._shared_model = SentenceTransformer(model_ref, device=device)
         else:
-            logger.info("Использую уже загруженную модель эмбеддингов из кэша")
+            logger.info("Using already loaded embedding model from cache")
             
         self.model = SemanticCache._shared_model
         
@@ -107,46 +106,43 @@ class SemanticCache:
                 return str(candidate)
         return model_name
 
-    # ------------------------------------------------------------------ #
-    # Загрузка / создание индекса и маппинга
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
+    # Helper functions: loading / creating index and mapping
+    # ------------------------------------------------------------------
 
     def _load_or_create_index(self) -> faiss.Index:
         if self.index_path.exists():
-            logger.info("Загружаю FAISS индекс из %s", self.index_path)
+            logger.info("Loading FAISS index from %s", self.index_path)
             index = faiss.read_index(str(self.index_path))
             if index.d != self.dim:
                 raise ValueError(
-                    f"Размерность индекса ({index.d}) не совпадает с "
-                    f"размерностью модели ({self.dim}). "
-                    f"Проверьте, что индекс создан той же моделью."
+                    f"Index dimension ({index.d}) does not match "
+                    f"model dimension ({self.dim}). "
+                    f"Check that the index was created with the same model."
                 )
             return index
 
-        logger.info("Индекс не найден, создаю новый IndexFlatIP(dim=%d)", self.dim)
+        logger.info("Index not found, creating new IndexFlatIP(dim=%d)", self.dim)
         flat = faiss.IndexFlatIP(self.dim)
-        # Оборачиваем в IndexIDMap2, чтобы можно было явно задавать id
-        # и удалять записи по id (обычный IndexFlatIP этого не умеет).
         return faiss.IndexIDMap2(flat)
 
     def _load_or_create_mapping(self) -> Dict[int, Dict]:
         if self.mapping_path.exists():
-            logger.info("Загружаю маппинг из %s", self.mapping_path)
+            logger.info("Loading mapping from %s", self.mapping_path)
             suffix = self.mapping_path.suffix.lower()
             if suffix == ".json":
                 with open(self.mapping_path, "r", encoding="utf-8") as f:
                     raw = json.load(f)
-                # JSON хранит ключи как строки -> конвертируем обратно в int
                 return {int(k): v for k, v in raw.items()}
             else:
                 with open(self.mapping_path, "rb") as f:
                     return pickle.load(f)
 
-        logger.info("Маппинг не найден, создаю пустой")
+        logger.info("Mapping not found, creating empty mapping")
         return {}
 
     def _save(self) -> None:
-        """Сохраняет индекс и маппинг на диск."""
+        """Saves the index and mapping to disk."""
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         self.mapping_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -165,50 +161,50 @@ class SemanticCache:
             with open(self.mapping_path, "wb") as f:
                 pickle.dump(self.mapping, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        logger.debug("Кэш сохранён: %s, %s", self.index_path, self.mapping_path)
+        logger.debug("Cache saved: %s, %s", self.index_path, self.mapping_path)
 
-    # ------------------------------------------------------------------ #
-    # Вспомогательное: эмбеддинг + L2-нормализация
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
+    # Helper functions: embedding + L2-normalization
+    # ------------------------------------------------------------------
 
     def _embed(self, text: str) -> np.ndarray:
         """
-        Считает эмбеддинг и L2-нормализует его.
+        Calculates embedding and L2-normalizes it.
 
-        L2-нормализация ОБЯЗАТЕЛЬНА: IndexFlatIP считает просто скалярное
-        произведение (inner product). Оно эквивалентно косинусному сходству
-        только если ||a|| = ||b|| = 1. Без нормализации значения будут
-        зависеть от длины вектора и порог 0.92 потеряет смысл.
+        L2-normalization is REQUIRED: IndexFlatIP calculates just the dot product
+        (inner product). It is equivalent to cosine similarity
+        only if ||a|| = ||b|| = 1. Without normalization, the values will
+        depend on the length of the vector and the threshold 0.92 will lose meaning.
         """
         vec = self.model.encode(
             text,
             convert_to_numpy=True,
-            normalize_embeddings=False,  # нормализуем сами, явно
+            normalize_embeddings=False, 
         ).astype("float32")
 
         vec = vec.reshape(1, -1)
-        faiss.normalize_L2(vec)  # in-place L2-нормализация (норма = 1)
+        faiss.normalize_L2(vec)
         return vec
 
-    # ------------------------------------------------------------------ #
-    # Публичный API
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def warmup(self) -> None:
-        """Прогревает sentence-transformer, чтобы первый search не тормозил."""
+        """Warm up the sentence-transformer to avoid slow first search."""
         start = time.perf_counter()
-        self._embed("привет")
-        logger.info("Warmup SemanticCache завершён за %.3f сек.", time.perf_counter() - start)
+        self._embed("hello")
+        logger.info("Warmup SemanticCache completed in %.3f seconds.", time.perf_counter() - start)
 
     def search(self, query_text: str, language: Optional[str] = None) -> Optional[Dict]:
         """
-        Ищет семантически близкий вопрос в кэше.
+        Finds a semantically similar question in the cache.
 
-        Возвращает:
+        Returns:
             {'response_text': str, 'audio_path': str, 'similarity': float,
              'matched_query': str, 'language': str}
-            если найдено совпадение с cosine similarity > threshold,
-            иначе None.
+            if a match is found with cosine similarity > threshold,
+            otherwise None.
         """
         if self.index.ntotal == 0:
             return None
@@ -227,15 +223,13 @@ class SemanticCache:
             best_sim = float(raw_sim)
             best_id = int(raw_id)
 
-            # faiss возвращает -1, если совпадений не найдено вообще
             if best_id == -1 or best_sim <= self.similarity_threshold:
                 continue
 
             entry = self.mapping.get(best_id)
             if entry is None:
-                # Индекс и маппинг рассинхронизировались — защищаемся от KeyError
                 logger.warning(
-                    "id %d есть в FAISS, но отсутствует в mapping", best_id
+                    "id %d is in FAISS, but missing from mapping", best_id
                 )
                 continue
 
@@ -245,8 +239,6 @@ class SemanticCache:
                     if entry_language != requested_language:
                         continue
                 elif requested_language not in {"ru", "en"}:
-                    # Старые записи без языка могли быть русскими/английскими.
-                    # Не отдаём их на испанский, японский и другие языки.
                     continue
 
             logger.debug(
@@ -276,25 +268,25 @@ class SemanticCache:
         force: bool = False,
     ) -> Optional[int]:
         """
-        Добавляет новую пару "вопрос -> ответ" в кэш.
+        Adds a new "question -> answer" pair to the cache.
 
-        Перед добавлением проверяет, нет ли уже почти идентичного вектора
-        в индексе (по умолчанию порог дубля = 0.995 — строже, чем порог
-        поиска в search(), т.к. это разные семантические пороги:
-        search() ищет "достаточно похожий вопрос", а дубль-проверка —
-        "практически тот же самый вопрос").
+        Before adding, it checks if there is already a nearly identical vector
+        in the index (by default, the duplicate threshold = 0.995 — stricter than the search threshold,
+        since these are different semantic thresholds:
+        search() looks for "sufficiently similar questions", while duplicate checking —
+        "practically the same question".
 
         Args:
-            force: если True, добавляет запись, даже если найден дубль.
+            force: if True, adds the record, even if a duplicate is found.
 
         Returns:
-            vector_id новой записи, либо id существующего дубля (если
-            запись не была добавлена), либо None при ошибке.
+            vector_id of the new record, or the id of the existing duplicate (if
+            the record was not added), or None on error.
         """
         if not query_text or not query_text.strip():
-            raise ValueError("query_text не может быть пустым")
+            raise ValueError("query_text cannot be empty")
         if not response_text or not response_text.strip():
-            raise ValueError("response_text не может быть пустым")
+            raise ValueError("response_text cannot be empty")
 
         vec = self._embed(query_text)
 
@@ -313,8 +305,8 @@ class SemanticCache:
                     if normalized_language and existing_language and existing_language != normalized_language:
                         continue
                     logger.info(
-                        "Дубль обнаружен (id=%d, sim=%.4f >= %.4f), "
-                        "добавление пропущено. Существующий вопрос: %r",
+                        "Duplicate found (id=%d, sim=%.4f >= %.4f), "
+                        "addition skipped. Existing question: %r",
                         existing_id,
                         sim,
                         self.duplicate_threshold,
@@ -337,7 +329,7 @@ class SemanticCache:
 
             self._save()
 
-        logger.info("Добавлена новая запись id=%d: %r", new_id, query_text)
+        logger.info("New record added id=%d: %r", new_id, query_text)
         return new_id
 
     def put(
@@ -349,12 +341,12 @@ class SemanticCache:
         force: bool = False,
     ) -> Optional[int]:
         """
-        Совместимый алиас для add().
+        Compatible alias for add().
         """
         return self.add(query_text, response_text, audio_path, language=language, force=force)
 
     def remove(self, vector_id: int) -> bool:
-        """Удаляет запись из кэша по id"""
+        """Removes a record from the cache by id"""
         with self._lock:
             if vector_id not in self.mapping:
                 return False
@@ -364,7 +356,7 @@ class SemanticCache:
             del self.mapping[vector_id]
             self._save()
 
-        logger.info("Запись id=%d удалена", vector_id)
+        logger.info("Record id=%d removed", vector_id)
         return True
 
     def __len__(self) -> int:
@@ -381,9 +373,9 @@ class SemanticCache:
         }
 
 
-# ---------------------------------------------------------------------- #
-# Пример использования
-# ---------------------------------------------------------------------- #
+# ----------------------------------------------------------------------
+# Example usage
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     cache = SemanticCache(
         index_path="cache/semantic_index.faiss",
@@ -396,19 +388,17 @@ if __name__ == "__main__":
         audio_path="audio/return_policy.wav",
     )
 
-    # Дубль — не должен добавиться повторно
     cache.add(
         query_text="Как оформить возврат товара?",
         response_text="Другой ответ, но вопрос тот же",
         audio_path="audio/return_policy_v2.wav",
     )
 
-    # Похожий, но не идентичный вопрос — должен найтись через search()
     result = cache.search("как вернуть товар обратно")
     if result:
         print(f"[HIT] sim={result['similarity']:.3f} -> {result['response_text']}")
         print(f"audio: {result['audio_path']}")
     else:
-        print("[MISS] релевантного ответа не найдено")
+        print("[MISS] relevant answer not found")
 
     print(cache.stats())

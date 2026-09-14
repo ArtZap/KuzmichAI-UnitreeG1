@@ -23,7 +23,7 @@ import json
 import os
 import urllib.request
 
-SERVER_URL = os.environ.get("SERVER_URL", "http://192.168.10.179:8002")
+SERVER_URL = os.environ.get("SERVER_URL", "http://192.168.1.103:8002")
 OUT_FILE = os.environ.get("ANALYZE_TTS_FILE", "/tmp/agrohab_analysis.txt")
 TIMEOUT = 90  # /analyze ~3-9с (cloud + reasoning M3) — с запасом
 FALLBACK = "Не удалось выполнить анализ. Попробуйте ещё раз."

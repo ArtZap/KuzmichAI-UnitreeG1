@@ -3,8 +3,9 @@ tts_engine.py
 --------------
 Local multilingual TTS for Unitree G1 EDU.
 
-Primary backend: Coqui XTTS v2 loaded from local files only.
-Fallback backend: Piper CLI with one local ONNX voice per language.
+Primary backend for non-RU: Coqui XTTS v2 loaded from local files only.
+Fallback backend for non-RU: Piper CLI with one local ONNX voice per language.
+Super-backend for RU: Silero TTS v5 (aidar) + ruaccent-predictor for maximum quality.
 
 Output contract for audio_io.AudioPlayer:
     WAV, mono, signed 16-bit PCM, 16000 Hz.
@@ -23,6 +24,9 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
+
+import soundfile as sf
+import torch
 
 logger = logging.getLogger("tts_engine")
 logger.setLevel(logging.INFO)
@@ -56,10 +60,10 @@ XTTS_LANGS: Set[str] = {
 }
 
 PIPER_MODEL_FILES: Dict[str, str] = {
-    "ru": "ru_RU-irina-medium.onnx",
-    "en": "en_US-lessac-medium.onnx",
+    "ru": "ru_RU-dmitri-medium.onnx",
+    "en": "en_US-ryan-medium.onnx",
     "es": "es_ES-davefx-medium.onnx",
-    "fr": "fr_FR-upmc-medium.onnx",
+    "fr": "fr_FR-tom-medium.onnx",
     "de": "de_DE-thorsten-medium.onnx",
     "zh-cn": "zh_CN-huayan-medium.onnx",
     "ar": "ar_JO-kareem-medium.onnx",
@@ -67,11 +71,11 @@ PIPER_MODEL_FILES: Dict[str, str] = {
     "it": "it_IT-riccardo-x_low.onnx",
     "pl": "pl_PL-darkman-medium.onnx",
     "tr": "tr_TR-dfki-medium.onnx",
-    "nl": "nl_NL-mls-medium.onnx",
+    "nl": "nl_NL-rdh-medium.onnx",
     "cs": "cs_CZ-jirka-medium.onnx",
-    "ja": "ja_JA-hi_fi_captain-medium.onnx",
-    "ko": "ko_KR-kss-medium.onnx",
-    "hu": "hu_HU-anna-medium.onnx",
+    "ja": "ja_JP-kenichi-medium.onnx",
+    "ko": "ko_KR-chunom-medium.onnx",
+    "hu": "hu_HU-mate-medium.onnx",
 }
 
 _WARMUP_PHRASES: Dict[str, str] = {
@@ -112,7 +116,7 @@ def _run_checked(command: Sequence[str], *, timeout: float, input_bytes: Optiona
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         stdout = result.stdout.decode("utf-8", errors="replace").strip()
         raise TTSEngineError(
-            "Command failed rc={}: {}\nstdout={}\nstderr={}".format(
+            "Command failed rc={}: {}\\nstdout={}\\nstderr={}".format(
                 result.returncode,
                 " ".join(command),
                 stdout,
@@ -124,8 +128,8 @@ def _run_checked(command: Sequence[str], *, timeout: float, input_bytes: Optiona
 class TTSEngine:
     """
     TTS engine with stable public API for main.py.
-
-    synthesize(text, lang_code, output_path) always writes a G1-ready WAV.
+    Now supports a dedicated Silero route for Russian to ensure maximum quality,
+    and XTTS/Piper routes for all other languages.
     """
 
     def __init__(
@@ -176,6 +180,36 @@ class TTSEngine:
         self._xtts_languages = self._load_xtts_language_set()
 
         self._ensure_system_tools()
+        
+        # --- Initialization of Silero v5 + ruaccent-predictor specifically for the Russian language ---
+        logger.info("[RU] Initializing ruaccent-predictor module...")
+        try:
+            self.accentor = None
+            from ruaccent import RUAccent
+            self.accentor = RUAccent()
+            self.accentor.load(omograph_model_size='turbo')
+        except Exception as exc:
+            import traceback
+            logger.error("Failed to load ruaccent-predictor: %s", exc)
+            traceback.print_exc()
+            self.accentor = None
+
+        logger.info("[RU] Loading Silero TTS v5 (v4_ru, aidar)...")
+        self.silero_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        try:
+            self.silero_model, _ = torch.hub.load(
+                repo_or_dir='snakers4/silero-models',
+                model='silero_tts',
+                language='ru',
+                speaker='v4_ru',
+                trust_repo=True
+            )
+            self.silero_model.to(self.silero_device)
+        except Exception as exc:
+            logger.error("Failed to load Silero TTS: %s", exc)
+            self.silero_model = None
+        # ---------------------------------------------------------------------------------
+
         self._log_configuration()
 
         if warmup_on_init:
@@ -223,13 +257,12 @@ class TTSEngine:
 
     def _log_configuration(self) -> None:
         logger.info(
-            "TTSEngine initialized | backend=%s | fallback_piper=%s | tempo=%.2f | gain=%.1f dB | xtts_dir=%s | speaker=%s",
+            "TTSEngine initialized | backend=%s | fallback_piper=%s | tempo=%.2f | gain=%.1f dB | xtts_dir=%s",
             self.backend,
             self.allow_piper_fallback,
             self.speech_tempo,
             self.gain_db,
             self.xtts_dir,
-            self.speaker_wav,
         )
 
     def _load_xtts(self) -> Any:
@@ -246,7 +279,7 @@ class TTSEngine:
 
             if not hasattr(torchaudio, "_patched_for_soundfile"):
                 def _sf_load(filepath, **kwargs):
-                    import soundfile as sf # на всякий случай
+                    import soundfile as sf
                     data, sr = sf.read(filepath, dtype='float32')
                     if data.ndim == 1:
                         data = data.reshape(-1, 1)
@@ -305,6 +338,15 @@ class TTSEngine:
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
 
+        # ---------------------------------------------------------------- #
+        # Spesial pipeline for Russian language (Silero + ruaccent)
+        # ---------------------------------------------------------------- #
+        if lang == "ru" and self.silero_model is not None:
+            return self._synthesize_silero(text, str(output))
+
+        # ---------------------------------------------------------------- #
+        # Pipeline for other languages (Piper / XTTS)
+        # ---------------------------------------------------------------- #
         if self.backend == "piper":
             return self._synthesize_piper(text, lang, str(output))
 
@@ -336,7 +378,7 @@ class TTSEngine:
                 if not langs:
                     langs = ["ru", "en"]
         logger.info("TTSEngine warmup for languages: %s", langs)
-        tmp = Path(tempfile.gettempdir()) / "tts_warmup.wav"
+        tmp = Path(tempfile.gettempdir()) / f"tts_warmup_{uuid.uuid4().hex}.wav"
         for lang in langs:
             phrase = _WARMUP_PHRASES.get(lang, "Hello.")
             try:
@@ -345,6 +387,35 @@ class TTSEngine:
             except Exception as exc:
                 logger.warning("  failed: %s: %s", lang, exc)
         tmp.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # Silero backend (Only for RU)
+    # ------------------------------------------------------------------ #
+
+    def _synthesize_silero(self, text: str, output_path: str) -> str:
+        raw_wav = output_path + ".silero.raw.wav"
+        with self._xtts_lock: 
+            if self.accentor:
+                processed_text = self.accentor.process_all(text)
+            else:
+                processed_text = text
+            
+            try:
+                audio = self.silero_model.apply_tts(
+                    text=processed_text,
+                    speaker='aidar',
+                    sample_rate=24000,
+                    put_accent=False,
+                    put_yo=False
+                )
+                audio_np = audio.cpu().numpy()
+                sf.write(raw_wav, audio_np, 24000, subtype='PCM_16')
+            except Exception as exc:
+                raise TTSEngineError(f"Silero TTS failed on text: {processed_text}") from exc
+
+        self._convert_to_g1_wav(raw_wav, output_path, is_piper=False)
+        Path(raw_wav).unlink(missing_ok=True)
+        return output_path
 
     # ------------------------------------------------------------------ #
     # XTTS backend
@@ -362,7 +433,7 @@ class TTSEngine:
                 language=lang,
                 split_sentences=self.xtts_split_sentences,
             )
-        self._convert_to_g1_wav(raw_wav, output_path)
+        self._convert_to_g1_wav(raw_wav, output_path, is_piper=False)
         Path(raw_wav).unlink(missing_ok=True)
         return output_path
 
@@ -409,7 +480,7 @@ class TTSEngine:
             "0.05",
         ]
         _run_checked(command, input_bytes=text.encode("utf-8"), timeout=30)
-        self._convert_to_g1_wav(raw_wav, output_path)
+        self._convert_to_g1_wav(raw_wav, output_path, is_piper=True)
         Path(raw_wav).unlink(missing_ok=True)
         return output_path
 
@@ -419,10 +490,6 @@ class TTSEngine:
     def _synthesize_espeak(self, text: str, lang: str, output_path: str) -> str:
         raw_wav = output_path + ".espeak.raw.wav"
         
-        # Настройки eSpeak:
-        # -v <lang> : язык (например, ru или en)
-        # -p 20     : pitch (высота тона). Значение 20 делает голос ниже и "суровее"
-        # -s 140    : speed (скорость). 140 чуть медленнее дефолта, звучит более размеренно
         command = [
             "espeak",
             "-v", lang,
@@ -433,9 +500,7 @@ class TTSEngine:
         ]
         
         _run_checked(command, timeout=10)
-        
-        self._convert_to_g1_wav(raw_wav, output_path)
-        
+        self._convert_to_g1_wav(raw_wav, output_path, is_piper=False)
         Path(raw_wav).unlink(missing_ok=True)
         return output_path
 
@@ -443,13 +508,25 @@ class TTSEngine:
     # Audio post-processing
     # ------------------------------------------------------------------ #
 
-    def _convert_to_g1_wav(self, input_path: str, output_path: str) -> None:
+    def _convert_to_g1_wav(self, input_path: str, output_path: str, is_piper: bool = False) -> None:
         command = ["sox", input_path, "-r", "16000", "-c", "1", "-b", "16", output_path, "norm", "-3"]
 
         if abs(self.speech_tempo - 1.0) > 1e-3:
             command.extend(["tempo", str(self.speech_tempo)])
         if abs(self.gain_db) > 1e-3:
             command.extend(["gain", "-l", str(self.gain_db)])
+
+        # --- robotic filter (make Piper voice more robotic) ---
+        if is_piper:
+            command.extend([
+                "pitch", "-150",        # Make the voice lower and rougher
+                "highpass", "300",      # Cuts low frequencies
+                "lowpass", "3000",      # Cuts high frequencies
+                "overdrive", "2",       # Adds metallic distortion
+                "tremolo", "25", "40"   # Adds mechanical vibration
+            ])
+        # ---------------------------------------------------
+
         _run_checked(command, timeout=20)
 
     @staticmethod
@@ -483,6 +560,6 @@ if __name__ == "__main__":
         ("Hello, I speak locally.", "en"),
         ("Bonjour, je parle localement.", "fr"),
     ]:
-        out = "/tmp/test_{}.wav".format(lang)
+        out = f"/tmp/test_{lang}.wav"
         engine.synthesize(text, lang, out)
-        print("{} -> {}".format(lang, out))
+        print(f"{lang} -> {out}")

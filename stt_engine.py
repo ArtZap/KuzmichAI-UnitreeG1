@@ -1,12 +1,12 @@
 """
 stt_engine.py
 
-Модуль распознавания речи (Speech-to-Text) для голосового робота.
-Поддерживает два бэкенда (выбираются через env VOICE_ENGINE_STT_BACKEND):
-  1. "whisper" (по умолчанию) - faster-whisper с жестким тюнингом от галлюцинаций.
-  2. "nemo" - NVIDIA NeMo (модели Parakeet/Canary) для экстремально шумных условий.
+Module for speech-to-text recognition for the voice robot.
+Supports two backends (selected via env VOICE_ENGINE_STT_BACKEND):
+  1. "whisper" (default) - faster-whisper with strict hallucination protection.
+  2. "nemo" - NVIDIA NeMo (Parakeet/Canary models) for extremely noisy conditions.
 
-Совместим с Python 3.8+.
+Compatible with Python 3.8+.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# CTranslate2 Hack для локального инференса
+# CTranslate2 Hack for local inference
 # ---------------------------------------------------------------------------
 _CT2_LIB_DIR = Path(os.environ.get("CTRANSLATE2_LIB_DIR", "/home/unitree/AgroBot/build_deps/ctranslate2_cuda_install/lib"))
 _CT2_LIB = _CT2_LIB_DIR / "libctranslate2.so.4"
@@ -35,19 +35,19 @@ if _CT2_LIB.exists():
 logger = logging.getLogger(__name__)
 
 class STTEngineError(RuntimeError):
-    """Базовое исключение для ошибок STTEngine."""
+    """Base exception for STTEngine errors."""
 
 # ---------------------------------------------------------------------------
-# Бэкенд 1: faster-whisper (Оригинальный, но с защитой от галлюцинаций)
+# Backend 1: faster-whisper (Original, but with hallucination protection)
 # ---------------------------------------------------------------------------
 class WhisperBackend:
     def __init__(self, model_size: str, device: str, compute_type: str, download_root: Optional[str]):
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
-            raise ImportError("Пакет 'faster-whisper' не установлен.") from exc
+            raise ImportError("Package 'faster-whisper' is not installed.") from exc
             
-        logger.info(f"[Whisper] Загрузка модели '{model_size}' (device={device}, compute_type={compute_type})...")
+        logger.info(f"[Whisper] Loading model '{model_size}' (device={device}, compute_type={compute_type})...")
         self.model = WhisperModel(
             model_size,
             device=device,
@@ -69,14 +69,10 @@ class WhisperBackend:
         detected_lang = getattr(info, "language", None)
         lang_prob = getattr(info, "language_probability", 0.0)
 
-        if detected_lang != "ru" and lang_prob < 0.6:
-            logger.info("Низкая вероятность языка (%.2f). Принудительно ставлю 'ru'.", lang_prob)
-            detected_lang = "ru"
-
         return text, detected_lang
 
 # ---------------------------------------------------------------------------
-# Бэкенд 2: NVIDIA NeMo (Parakeet / Canary)
+# Backend 2: NVIDIA NeMo (Parakeet / Canary)
 # ---------------------------------------------------------------------------
 class NeMoBackend:
     def __init__(self, model_size: str, device: str):
@@ -86,50 +82,37 @@ class NeMoBackend:
             self.sf = sf
         except ImportError as exc:
             raise ImportError(
-                "Пакеты NeMo не установлены. Установите: "
+                "NeMo packages are not installed. Install them.: "
                 "pip install nemo_toolkit['asr'] soundfile"
             ) from exc
 
-        # main.py по умолчанию может передавать абсолютный путь к локальному whisper_small.
-        # Если это так, мы игнорируем этот путь и используем Parakeet.
         if "whisper" in model_size.lower() or os.path.exists(model_size):
             nemo_model_name = os.environ.get("VOICE_ENGINE_NEMO_MODEL", "nvidia/parakeet-tdt-0.6b-v3")
         else:
             nemo_model_name = model_size if "/" in model_size else "nvidia/parakeet-tdt-0.6b-v3"
         
-        logger.info(f"[NeMo] Загрузка ASR-модели '{nemo_model_name}' (device={device})...")
-        # NeMo сама умеет маппить на устройство
+        logger.info(f"[NeMo] Loading ASR model '{nemo_model_name}' (device={device})...")
         self.model = nemo_asr.models.ASRModel.from_pretrained(model_name=nemo_model_name, map_location=device)
         self.model.eval()
 
-        # Для Canary-моделей нужно явно указывать задачу
         if "canary" in nemo_model_name.lower():
             self.is_canary = True
-            # Настройка под транскрипцию (без перевода)
             self.model.task = "asr"
-            self.model.source_lang = "ru" # Можно менять динамически в transcribe
+            self.model.source_lang = "ru"
             self.model.dest_lang = "ru"
         else:
             self.is_canary = False
 
     def transcribe(self, audio_array: np.ndarray, language: Optional[str] = None) -> Tuple[str, str]:
-        # NVIDIA NeMo ASRModel.transcribe() ожидает список путей к аудиофайлам.
-        # Поскольку у нас в памяти float32-массив, мы сбрасываем его во временный WAV.
-        # На Linux tempfile использует tmpfs (ОЗУ), поэтому диск не трогается, IO-задержка равна ~0.
-        
         fd, tmp_path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
         try:
             self.sf.write(tmp_path, audio_array, 16000)
             
-            # Если это Canary и мы знаем язык запроса
             if self.is_canary and language:
-                # В NeMo языковые коды отличаются от Whisper, но базовые ru/en совпадают
                 self.model.source_lang = language
                 self.model.dest_lang = language
 
-            # В разных версиях NeMo параметр называется по-разному.
-            # Пробуем все возможные варианты, чтобы избежать TypeError:
             try:
                 texts = self.model.transcribe(audio=[tmp_path], batch_size=1)
             except TypeError:
@@ -139,7 +122,6 @@ class NeMoBackend:
                     try:
                         texts = self.model.transcribe(audio_paths=[tmp_path], batch_size=1)
                     except TypeError:
-                        # Самый жесткий фоллбек: передаем как позиционный аргумент
                         texts = self.model.transcribe([tmp_path])
             
             if not texts or not texts[0]:
@@ -159,23 +141,57 @@ class NeMoBackend:
                     recognized_text = str(res)
                     
         finally:
-            # Обязательно подчищаем tmpfs
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
                 
         recognized_text = recognized_text.strip()
         
-        # NVIDIA NeMo обычно не возвращает вероятность языка как Whisper,
-        # поэтому мы отдаем тот язык, который ожидался (или None для фоллбека).
         return recognized_text, language
 
+# ---------------------------------------------------------------------------
+# Backend 3: Hibrid (Whisper + GigaAM) (special for Russian language)
+# ---------------------------------------------------------------------------
+
+import onnx_asr
+from faster_whisper import WhisperModel
+
+class HybridBackend:
+    def __init__(self, device: str, compute_type: str, gigaam_path: str):
+        logger.info("[Hybrid] Loading Whisper large-v3-turbo...")
+        self.whisper = WhisperModel(
+            "large-v3-turbo", 
+            device=device, 
+            compute_type=compute_type
+        )
+        
+        logger.info("[Hybrid] Loading GigaAM-v3-e2e-rnnt (INT8)...")
+        self.gigaam = onnx_asr.Model(gigaam_path, provider="CUDAExecutionProvider" if device == "cuda" else "CPUExecutionProvider")
+
+    def transcribe(self, audio_array: np.ndarray, language: Optional[str] = None) -> Tuple[str, str]:
+        _, info = self.whisper.detect_language(audio_array)
+        detected_lang = info.language
+
+        if detected_lang == "ru":
+            logger.debug("[Hybrid] Detected 'ru', routing to GigaAM.")
+            recognized_text = self.gigaam.transcribe(audio_array)
+            return recognized_text.strip(), "ru"
+        else:
+            logger.debug(f"[Hybrid] Detected '{detected_lang}', routing to Whisper.")
+            segments, _ = self.whisper.transcribe(
+                audio_array, 
+                language=detected_lang,
+                beam_size=1,
+                condition_on_previous_text=False
+            )
+            recognized_text = "".join(segment.text for segment in segments).strip()
+            return recognized_text, detected_lang
 
 # ---------------------------------------------------------------------------
-# Главный фасад (Диспетчер)
+# Main facade (Dispatcher)
 # ---------------------------------------------------------------------------
 class STTEngine:
     """
-    Обертка над STT. Загружает нужный движок на основе VOICE_ENGINE_STT_BACKEND.
+    Wrapper around STT. Loads the required backend based on VOICE_ENGINE_STT_BACKEND.
     """
 
     _WHISPER_TO_XTTS_LANG_MAP = {
@@ -199,11 +215,19 @@ class STTEngine:
         self.device = device
         self._is_warmed_up = False
         
-        # Определяем, какой движок использовать
         self.backend_type = os.environ.get("VOICE_ENGINE_STT_BACKEND", "whisper").strip().lower()
         
         load_start = time.perf_counter()
-        if self.backend_type == "nemo":
+        if self.backend_type == "hybrid":
+            default_gigaam = str(Path(__file__).resolve().parent / "models" / "gigaam_v3_e2e_rnnt_int8.onnx")
+            gigaam_path = os.environ.get("VOICE_ENGINE_GIGAAM_MODEL", default_gigaam)
+            
+            self.backend = HybridBackend(
+                device=device, 
+                compute_type=compute_type,
+                gigaam_path=gigaam_path
+            )
+        elif self.backend_type == "nemo":
             self.backend = NeMoBackend(model_size=model_size, device=device)
         else:
             self.backend_type = "whisper"
@@ -215,23 +239,23 @@ class STTEngine:
             )
             
         load_time = time.perf_counter() - load_start
-        logger.info("Движок '%s' загружен за %.2f сек.", self.backend_type, load_time)
+        logger.info("Backend '%s' loaded in %.2f seconds.", self.backend_type, load_time)
 
     def warmup(self, sample_rate: int = 16000, duration_sec: float = 1.0) -> None:
-        """Прогревает модель массивом тишины для инициализации CUDA-графов."""
-        logger.debug("Запуск warmup() STTEngine...")
+        """Warms up the model with a silence array for CUDA graph initialization."""
+        logger.debug("Starting warmup() STTEngine...")
         silence = np.zeros(int(sample_rate * duration_sec), dtype=np.float32)
 
         warmup_start = time.perf_counter()
         try:
             self.backend.transcribe(silence)
         except Exception as exc:
-            logger.exception("Ошибка во время warmup().")
-            raise STTEngineError(f"Ошибка прогрева модели STT: {exc}") from exc
+            logger.exception("Error occurred during warmup().")
+            raise STTEngineError(f"Error warming up STT model: {exc}") from exc
 
         warmup_time = time.perf_counter() - warmup_start
         self._is_warmed_up = True
-        logger.info("Warmup STTEngine завершён за %.3f сек.", warmup_time)
+        logger.info("Warmup STTEngine completed in %.3f seconds.", warmup_time)
 
     def _map_language_to_xtts(self, detected_lang: Optional[str]) -> str:
         if not detected_lang:
@@ -243,11 +267,11 @@ class STTEngine:
         self,
         audio_array: np.ndarray,
         language: Optional[str] = None,
-        beam_size: int = 5, # Оставлен для совместимости сигнатуры, игнорируется внутри для анти-галлюцинаций
+        beam_size: int = 1,
     ) -> Tuple[str, str]:
         
         if not self._is_warmed_up:
-            logger.warning("transcribe() вызван до warmup().")
+            logger.warning("transcribe() called before warmup().")
 
         if audio_array is None or audio_array.size == 0:
             return "", self._FALLBACK_LANG
@@ -259,14 +283,14 @@ class STTEngine:
         try:
             recognized_text, detected_lang = self.backend.transcribe(audio_array, language=language)
         except Exception as exc:
-            logger.exception("Ошибка во время transcribe().")
-            raise STTEngineError(f"Ошибка транскрибации: {exc}") from exc
+            logger.exception("Error occurred during transcribe().")
+            raise STTEngineError(f"Error transcribing: {exc}") from exc
 
         latency = time.perf_counter() - start_time
         xtts_lang_code = self._map_language_to_xtts(detected_lang)
 
         logger.debug(
-            "STT latency=%.3f сек | backend=%s | audio_len=%.2f сек | lang=%s -> xtts_lang=%s | text_len=%d",
+            "STT latency=%.3f seconds | backend=%s | audio_len=%.2f seconds | lang=%s -> xtts_lang=%s | text_len=%d",
             latency,
             self.backend_type,
             audio_array.shape[0] / 16000.0,
@@ -280,7 +304,7 @@ class STTEngine:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
-    # Для теста NeMo установи: export VOICE_ENGINE_STT_BACKEND=nemo
+    # For test NeMo: export VOICE_ENGINE_STT_BACKEND=nemo
     engine = STTEngine()
     engine.warmup()
     dummy_audio = np.zeros(16000 * 2, dtype=np.float32)
