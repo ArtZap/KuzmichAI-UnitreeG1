@@ -1,16 +1,16 @@
 # KuzmichAI v2 — Offline Voice Assistant (Unitree G1 & Local PC)
 
-An entirely offline, multilingual voice assistant originally tailored for the Unitree G1 EDU humanoid robot, **but fully capable of running standalone on any standard PC or laptop**. "Kuzmich" features a unique persona of a grumbly Soviet agricultural robot, designed with strict safety guardrails and a highly responsive architecture.
+An entirely offline, multilingual voice assistant originally tailored for the Unitree G1 EDU humanoid robot, **but fully capable of running standalone on any standard PC or laptop**. "Kuzmich" features a unique persona of a grumbly Soviet agricultural robot, designed with strict safety guardrails, a highly responsive architecture, and a few hidden surprises.
 
 ## Key Technical Features
 
 * **Hardware-Agnostic Audio:** Seamlessly switch between the robot's hardware (UDP multicast interception) and standard local hardware (laptop microphone and speakers via `sounddevice`).
-* **Asynchronous Pipeline:** A dual-worker streaming architecture minimizing latency between LLM generation and TTS synthesis.
-* **LLM Engine:** Streaming token generation via `llama-cpp-python`, dynamically slicing tokens into complete sentences for instant playback.
-* **STT Engine:** Integration of `faster-whisper` and NVIDIA NeMo (Parakeet) for robust speech recognition in high-noise environments.
-* **TTS Engine:** High-fidelity local synthesis using Coqui XTTS v2, with a lightweight Piper or eSpeak fallback mechanism.
-* **Hardware Audio Routing (G1 Mode):** Direct interception of UDP multicast (239.168.123.161) from the robot's RockChip microphone, bypassing standard DDS overhead.
-* **Semantic Caching:** Zero-latency responses for repetitive queries utilizing `FAISS` and `sentence-transformers`.
+* **Asynchronous Streaming Pipeline:** A dual-worker architecture minimizing latency. The LLM streams tokens, slices them into sentences, and feeds them to the TTS engine, which plays audio chunks instantly.
+* **Hybrid STT Engine:** Supports `faster-whisper`, NVIDIA NeMo (Parakeet) for noisy environments, and a **Hybrid mode (Whisper + GigaAM)** optimized for flawless Russian speech recognition.
+* **Multi-Backend TTS Engine:** High-fidelity local synthesis using **Coqui XTTS v2** for multi-lang, **Silero TTS v5 (with ruaccent-predictor)** for native-quality Russian, and Piper / eSpeak as lightweight fallbacks.
+* **Semantic Caching (FAISS):** Zero-latency responses for repetitive queries utilizing a vector database and `sentence-transformers`. Pre-build answers with `build_kb_cache.py`.
+* **Wizard of Oz (Operator Console):** A built-in TCP server and remote panel (`remote_panel.py`) allowing a human operator to inject speech and trigger robot gestures in real-time.
+* **Secret "Aunt Vasya" Protocol:** An uncensored, aggressive alter-ego mode that bypasses safety guardrails, activated via specific voice triggers.
 
 ## System Architecture
 
@@ -19,53 +19,50 @@ KuzmichAI features a modular audio input/output layer that adapts to your hardwa
 ```mermaid
 graph TD
     subgraph Input [Audio Input Layer]
-        M1[G1 RockChip Mic] -- UDP Multicast 239.168.123.161 --> UDP[Audio Receiver]
+        M1[G1 RockChip Mic] -- UDP Multicast --> UDP[Audio Receiver]
         M2[Local PC Mic] -- Sounddevice API --> UDP
         UDP --> VAD[Silero VAD v4]
     end
 
     subgraph Core [Processing Engine]
-        VAD -- Clean Speech Array --> STT[STT Engine: Whisper / NeMo]
+        VAD -- Clean Speech Array --> STT[STT: Whisper / NeMo / GigaAM]
         STT -- Text Query --> Cache{Semantic Cache FAISS}
         Cache -- Hit --> Play[Audio Player]
-        Cache -- Miss --> LLM[LLM Engine: Qwen 7B GGUF]
+        Cache -- Miss --> LLM[LLM: Qwen 7B GGUF via llama-cpp]
     end
 
     subgraph AsyncPipeline [Streaming Output Pipeline]
-        LLM -- Yields Sentences --> Worker1[TTS Producer Worker]
+        LLM -- Yields Sentences --> Worker1[TTS Producer: XTTS/Silero/Piper]
         Worker1 -- Generates WAV --> Queue[(Asyncio Queue)]
-        Queue -- Consumes WAV --> Worker2[Audio Consumer Worker]
-        Worker2 -- RPC PlayStream --> Robot1[G1 Speakers]
+        Queue -- Consumes WAV --> Worker2[Audio Consumer]
+        Worker2 -- RPC PlayStream --> Robot1[G1 Speakers & Gestures]
         Worker2 -- Sounddevice API --> Robot2[Local PC Speakers]
     end
     
     Worker2 -- Merges Chunks --> CacheWrite[Save to Cache]
+    OpPanel[remote_panel.py] -- TCP Socket --> Worker1
 
 ```
 
-## Technical Challenges & Solutions
+## Project Structure
 
-Developing an offline voice assistant for live, physical environments like agricultural robotics exhibitions presents unique hardware and software hurdles.
+```text
+├── main.py                  # Main async event loop and pipeline orchestrator
+├── audio_io.py              # Mic listeners and audio players (G1 UDP & Local)
+├── llm_engine.py            # LLM streaming and prompt/persona management
+├── stt_engine.py            # STT router (Whisper, NeMo, Hybrid GigaAM)
+├── tts_engine.py            # TTS router (XTTS, Silero, Piper, eSpeak)
+├── semantic_cache.py        # Vector database management (FAISS)
+├── build_kb_cache.py        # Script to pre-synthesize responses from kb_dump.json
+├── remote_panel.py          # Operator console for remote control (Wizard of Oz)
+├── analyze_for_tts.py       # VLM integration for scene analysis 
+├── g1_greeting_gestures.py  # Unitree G1 gesture controller mapping
+├── start.sh                 # Supervisor script to run the assistant
+├── setup.sh                 # Environment setup and dependencies installation
+├── models/                  # Directory for downloaded ML models (ignored in git)
+└── cache_audio/             # Generated audio cache (ignored in git)
 
-### 1. Bypassing DDS for Real-Time Audio
-
-**Challenge:** The official Unitree SDK's RPC `GetAudioData` introduces unacceptable latency and often drops payloads.
-**Solution:** Reversed-engineered the audio routing to discover the physical RockChip controller broadcasts raw 16-bit mono PCM via UDP multicast. Implemented a background threaded socket (`MulticastMicReceiver`) to capture this stream directly. For non-robot environments, a transparent `LocalMicSource` fallback captures audio via standard OS APIs.
-
-### 2. Asynchronous Producer-Consumer Streaming
-
-**Challenge:** Waiting for a full LLM response before initiating TTS synthesis causes unnatural, multi-second conversational delays.
-**Solution:** Engineered a dual-worker streaming pipeline. The `LLMEngine` parses the token stream and yields complete sentences dynamically. A Producer worker immediately synthesizes the audio via XTTS, placing the WAV paths into an `asyncio.Queue`. A Consumer worker instantly plays the audio chunks, overlapping generation and playback to achieve near-zero perceived latency.
-
-### 3. Prompt Engineering & Strict Guardrails
-
-**Challenge:** Ensuring the LLM stays strictly in character without hallucinating inappropriate or politically sensitive responses in public settings.
-**Solution:** Designed a rigorous system prompt enforcing a "grumbly but respectful" persona. The prompt includes hardcoded defensive behaviors (e.g., automatically speaking respectfully and positively about agricultural ministries and government apparatuses) while utilizing a custom regex filter to block unwanted AI tropes before they reach the TTS engine.
-
-### 4. Zero-Latency Semantic Caching
-
-**Challenge:** Repetitive questions at live demonstrations drain GPU resources and introduce unnecessary generation time.
-**Solution:** Integrated a local Vector DB (`FAISS` with `IndexFlatIP`) paired with `sentence-transformers`. Incoming queries are L2-normalized and matched via cosine similarity (threshold > 0.85). Cache hits instantly play pre-rendered WAV files, bypassing the STT-LLM-TTS pipeline entirely.
+```
 
 ## Deployment & Setup
 
@@ -83,11 +80,11 @@ chmod +x setup.sh
 
 ### 2. Model Placement
 
-Ensure the following offline models are placed in their respective directories before launching:
+Ensure the following offline models are placed in the `models/` directory before launching:
 
-* **LLM:** Place the `.gguf` file in `models/`
-* **STT:** Faster-whisper or NeMo Parakeet models in `models/faster_whisper/`
-* **TTS:** Coqui XTTS v2 files (`model.pth`, `config.json`, `vocab.json`) in `models/xtts_v2/`
+* **LLM:** `.gguf` file (e.g., Qwen2.5).
+* **STT:** Faster-whisper, NeMo Parakeet, or GigaAM ONNX models.
+* **TTS:** Coqui XTTS v2 files (`model.pth`, `config.json`, `vocab.json`). Silero models are downloaded automatically via PyTorch Hub.
 
 ### 3. Execution Modes
 
@@ -106,5 +103,15 @@ You can fully test the assistant using your laptop's built-in microphone and spe
 
 ```bash
 ./start.sh
+
+```
+
+### 4. Operator Console (Wizard of Oz)
+
+While the main assistant is running, open a new terminal and launch the remote panel to inject custom speech and gestures:
+
+```bash
+python remote_panel.py
+# Try typing: /en [gesture: shakehands] Hello, it is nice to meet you!
 
 ```
