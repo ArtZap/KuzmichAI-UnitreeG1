@@ -1,15 +1,30 @@
-.env
+# Виртуальное окружение и Python-кэш
+venv/
 __pycache__/
 *.pyc
-venv/
+*.pyo
+*.pyd
+
+# Тяжелые ML-модели и бинарники (скачиваются отдельно)
 models/
+piper/
+
+# Сгенерированный аудио-кэш и временные файлы
 cache_audio/
 cache_analyz_audio/
 kb_audio/
+custom_cache/
 *.wav
+# Исключения (сохраняем в репозитории базовые системные звуки)
+!speaker.wav
+!startup.wav
+!scanning.wav
+cache_builder.py
+cache_manager.py
+g1_console_gui.py
+
+# Базы FAISS, дампы и логи
 *.faiss
 *.pkl
-g1_voice_engine.log
-piper/
-custom_cache/
-g1_console_gui.py/
+kb_dump.json
+*.log

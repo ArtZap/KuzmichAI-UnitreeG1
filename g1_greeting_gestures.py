@@ -15,7 +15,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 class G1GestureController:
     """
-    Контроллер жестов с использованием локального HTTP API робота G1.
+    Gesture controller using the G1 robot's local HTTP API.
     """
 
     def __init__(
@@ -26,37 +26,32 @@ class G1GestureController:
         self.enabled = _env_bool("VOICE_ENGINE_ENABLE_GESTURES", True) if enabled is None else enabled
         self.log = log or logging.getLogger("G1GestureController")
         
-        # IP робота берем из переменных окружения
         self.robot_ip = os.environ.get("VOICE_ENGINE_ROBOT_IP", "192.168.1.103")
-        # Формируем URL для обращения к API на 8091 порту
         self.api_url = f"http://{self.robot_ip}:8091"
 
     def start(self, gesture_name: str) -> None:
-        """Отправляет HTTP-запрос на запуск жеста, если робот не занят."""
+        """Sends an HTTP request to start a gesture if the robot is not busy."""
         if not self.enabled:
-            self.log.debug("Жесты отключены, пропуск: %s", gesture_name)
+            self.log.debug("Gestures disabled, skip: %s", gesture_name)
             return
 
-        self.log.info("--> Запуск жеста: %s (через HTTP API)", gesture_name)
+        self.log.info("--> Starting gesture: %s (via HTTP API)", gesture_name)
 
         try:
-            # 1. Проверяем статус: не занят ли робот другим движением
             status_response = requests.get(f"{self.api_url}/api/status", timeout=1.0)
             status_response.raise_for_status()
             
-            # Если "busy": true, пропускаем новый жест, чтобы не было конфликтов
             if status_response.json().get("busy"):
-                self.log.warning("Робот занят другим жестом. Пропуск: %s", gesture_name)
+                self.log.warning("Robot is busy with another gesture. Skipping: %s", gesture_name)
                 return
 
-            # 2. Отправляем команду на старт нового жеста
             play_response = requests.post(
                 f"{self.api_url}/api/motion",
                 json={"name": gesture_name},
                 timeout=1.0
             )
             play_response.raise_for_status()
-            self.log.debug("Жест успешно передан на робота.")
+            self.log.debug("Gesture successfully sent to the robot.")
             
         except requests.exceptions.RequestException as exc:
-            self.log.error("Не удалось запустить жест %s через API: %s", gesture_name, exc)
+            self.log.error("Failed to launch gesture %s via the API: %s", gesture_name, exc)

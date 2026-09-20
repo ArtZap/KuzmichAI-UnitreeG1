@@ -48,7 +48,7 @@ from g1_greeting_gestures import G1GestureController
 import re
 
 GESTURE_REGEX = re.compile(
-    r'\[(?:жест|jest|gest)[\s:]*([^\]]+)\]', re.IGNORECASE
+    r'\[*(?:жест|jest|gest|gesture)[\s:]*([^\]]+)\]', re.IGNORECASE
 )
 
 GESTURE_MAP = {
@@ -176,7 +176,6 @@ USE_TRIGGERS = os.environ.get("VOICE_ENGINE_USE_TRIGGERS", "true").strip().lower
 NOISE_THRESHOLD = float(os.environ.get("VOICE_ENGINE_NOISE_THRESHOLD", "0.6"))
 ENABLE_INTERRUPT = os.environ.get("VOICE_ENGINE_ENABLE_INTERRUPT", "true").strip().lower() == "true"
 STT_LANGUAGE_ENV = os.environ.get("VOICE_ENGINE_STT_LANGUAGE", "auto").strip().lower()
-STT_LANG = None if STT_LANGUAGE_ENV == "auto" else STT_LANGUAGE_ENV
 ENABLE_GESTURES = os.environ.get("VOICE_ENGINE_ENABLE_GESTURES", "true").strip().lower() == "true"
 
 # ===========================================================================
@@ -246,6 +245,7 @@ class VoiceAssistant:
         self.is_awake = not USE_TRIGGERS
         self.is_analiz = False
         self.uncensored_mode = False
+        self.stt_lang = None if STT_LANGUAGE_ENV == "auto" else STT_LANGUAGE_ENV
 
         # STTEngine is designed for GPU (see its docstring: "device — strictly
         # cuda", "compute_type — strictly int8_float16"). 
@@ -388,7 +388,7 @@ class VoiceAssistant:
             self.executor,
             self.stt.transcribe,
             audio_data,
-            STT_LANG,
+            self.stt_lang,
         )
 
     async def _run_tts(self, sentence: str, lang_code: str = "ru") -> str:
@@ -911,8 +911,14 @@ class VoiceAssistant:
         try:
             queue_task = asyncio.create_task(self.operator_queue.get())
             listen_task = None
+            counter = 0
 
             while self._running:
+                if counter == 10:
+                    self.llm.clear_history()
+                    counter = 0
+                else:
+                    counter += 1
                 # ── Step 1: Competitive Waiting (Microphone OR Remote Control) ────────────
                 if listen_task is None or listen_task.done():
                     log.info("--> Listening...")
@@ -1002,12 +1008,12 @@ class VoiceAssistant:
                 clean_words = set(re.findall(r'\b\w+\b', query.lower()))
 
                 if USE_TRIGGERS:
-                    # ── Секретный протокол "Тётя Вася" ───────────────────
+                    # ── "Aunt Vasya" Secret Protocol (only ru) ───────────────────
                     query_lower_full = query.lower()
                     
                     if "тётя вася" in query_lower_full or "тетя вася" in query_lower_full:
                         if not self.uncensored_mode:
-                            log.warning("--> 🔓 ПРОТОКОЛ 'ТЁТЯ ВАСЯ' АКТИВИРОВАН НАВСЕГДА!")
+                            log.warning("--> 🔓 'Auntie Vasya' Protocol activated permanently.!")
                             self.uncensored_mode = True
                             self.llm.clear_history()
                         
@@ -1020,13 +1026,13 @@ class VoiceAssistant:
                         try:
                             await self._run_streaming_pipeline(query, "ru", uncensored=True)
                         except Exception as exc:
-                            log.error("Ошибка в режиме Тётя Вася: %s", exc)
+                            log.error("Error in 'Aunt Vasya' mode: %s", exc)
                         
                         continue
-                    # ── Отключение секретного протокола "Тётя Вася" ───────────────────
-                    disable_vasya_triggers = ["дядя вася", "отбой протокола"]
+                    # ── Deactivation of the "Aunt Vasya" secret protocol (only ru) ───────────────────
+                    disable_vasya_triggers = ["дядя вася", "отбой протокола", "дядя вайсе"]
                     if self.uncensored_mode and any(h in query_lower_full for h in disable_vasya_triggers):
-                        log.info("--> 🔒 ПРОТОКОЛ 'ТЁТЯ ВАСЯ' ОТКЛЮЧЕН. Возвращение Кузьмича.")
+                        log.warning("--> 🔒 'Auntie Vasya' Protocol deactivated. Returning to normal mode.")
                         self.uncensored_mode = False
                         self.llm.clear_history()
                         self.is_analiz = True
@@ -1038,10 +1044,25 @@ class VoiceAssistant:
                         try:
                             await self._run_streaming_pipeline(query, "ru", custom_generator=back_to_normal_gen())
                         except Exception as exc:
-                            log.error("Ошибка при отключении режима: %s", exc)
+                            log.error("Error when disabling mode: %s", exc)
                         continue
                     # ────────────────────────────────────────────────────────
-
+                    only_ru_words = [
+                        "балалайка", "достоевский", "лалалайка", "ла-ла-лайка",
+                    ]
+                    if any(h in clean_words for h in only_ru_words):
+                        log.info("--> Command ONLY RU. Transitioning to only ru mode.")
+                        self.llm.clear_history()
+                        self.stt_lang = "ru"
+                        continue
+                    all_lang_words = [
+                        "мультиязычность", "рахманинов",
+                    ]
+                    if any(h in clean_words for h in all_lang_words):
+                        log.info("--> Command ALL LANG. Transitioning to all lang mode.")
+                        self.llm.clear_history()
+                        self.stt_lang = None
+                        continue
                     stop_words = [
                         "stop", "top", "стоп", "топ",
                     ]
@@ -1094,7 +1115,7 @@ class VoiceAssistant:
                         continue
 
                     heart_words = [
-                        "сделаем фото", "сделаем селфи", "сделаем сердечко", "сердечко вместе", "сердечко один",
+                        "сделаем фото", "сделаем селфи", "сделаем сердечко", "сердечко вместе", "сердечко один", "пол сердца", "половина сердца", "половина сердечка", "пол сердечка",
                         "make a photo", "make a selfie", "make a heart", "heart together", "heart one",
                     ]
                     if any(h in clean_words for h in heart_words):
@@ -1103,10 +1124,10 @@ class VoiceAssistant:
 
                         def greeting_gen():
                             if lang_code == "en":
-                                yield "[жест: site_right_demo] Let's take a photo, dear guest!"
+                                yield "[жест: rightheart] Let's take a photo, dear guest!"
                                 yield "Please smile and complete my heart!"
                             else:
-                                yield "[жест: site_right_demo] Давайте сделаем фото, уважаемый гость!"
+                                yield "[жест: rightheart] Давайте сделаем фото, уважаемый гость!"
                                 yield "Пожалуйста, улыбнитесь и дополните мое сердечко!"
 
                         try:
@@ -1199,7 +1220,7 @@ class VoiceAssistant:
                 is_kb_hit = False
 
                 if self.uncensored_mode:
-                    log.info("Режим Тёти Васи: пропускаем поиск в кэше.")
+                    log.info("'Aunt Vasya' mode: skip cache lookup.")
                     self.is_analiz = True
                 else:
                     clean_query = re.sub(r'^[^\w\s]+|[^\w\s]+$', '', query).strip()

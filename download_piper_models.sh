@@ -1,6 +1,5 @@
 #!/bin/bash
 # download_piper_models.sh
-# Скачивает Piper-модели для всех языков из _WHISPER_TO_XTTS_LANG_MAP
 
 BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main"
 DIR="$HOME/.local/share/piper"
@@ -28,10 +27,10 @@ declare -A MODELS=(
 for lang in "${!MODELS[@]}"; do
     path="${MODELS[$lang]}"
     name=$(basename "$path")
-    echo "⬇️  Скачиваю $lang → $name ..."
+    echo "Downloading $lang → $name ..."
     wget -q --show-progress -O "$DIR/${name}.onnx" "$BASE/${path}.onnx"
     wget -q -O "$DIR/${name}.onnx.json" "$BASE/${path}.onnx.json"
-    echo "✅  $lang готов"
+    echo "$lang ready"
 done
 
-echo "🎉 Все модели скачаны в $DIR"
+echo "🎉 All models downloaded to $DIR"

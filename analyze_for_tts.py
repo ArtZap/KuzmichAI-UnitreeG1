@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Помощник голосовому модулю: функция — запросить анализ сцены на сервере и
-получить путь к файлу с текстом для TTS.
+"""Helper for the voice module: a function to request a scene analysis from the server
+and retrieve the path to a text file for TTS.
 
-    from analyze_for_tts import analyze_for_tts
-    path = analyze_for_tts()
-    tts_say(open(path, encoding="utf-8").read())   # озвучить
+from analyze_for_tts import analyze_for_tts
+path = analyze_for_tts()
+tts_say(open(path, encoding="utf-8").read())   # speak the text
 
-Функция делает POST /analyze к perception-серверу (192.168.10.179:8002), берёт
-описание сцены (поле summary) и пишет его в файл (атомарно, write+rename — чтобы
-TTS не прочитал наполовину). Возвращает путь к файлу. При ошибке в файл кладётся
-fallback-текст, чтобы робот не молчал.
+The function sends a POST /analyze request to the perception server (192.168.10.179:8002),
+takes the scene description (the 'summary' field), and writes it to a file (atomically,
+using write+rename, to prevent TTS from reading a partial file). It returns the file path.
+In case of an error, fallback text is written to the file so the robot does not remain silent.
 
-Только стандартная библиотека (urllib/json/os) — системный python3, venv НЕ нужен.
-Подходит для робота и ПК.
+Uses only the standard library (urllib/json/os)—system Python 3; no venv required.
+Suitable for both the robot and a PC.
 
-Параметры (опциональны, дефолты из env):
-  out     путь выходного файла   — env ANALYZE_TTS_FILE (дефолт /tmp/agrohab_analysis.txt)
-  url     URL сервера            — env SERVER_URL       (дефолт http://192.168.10.179:8002)
-  timeout таймаут HTTP, сек
+Parameters (optional; defaults from environment variables):
+out     output file path       — env ANALYZE_TTS_FILE (default /tmp/agrohab_analysis.txt)
+url     server URL             — env SERVER_URL       (default http://192.168.10.179:8002)
+timeout HTTP timeout, seconds
 """
 import json
 import os
@@ -25,14 +25,15 @@ import urllib.request
 
 SERVER_URL = os.environ.get("SERVER_URL", "http://192.168.1.103:8002")
 OUT_FILE = os.environ.get("ANALYZE_TTS_FILE", "/tmp/agrohab_analysis.txt")
-TIMEOUT = 90  # /analyze ~3-9с (cloud + reasoning M3) — с запасом
-FALLBACK = "Не удалось выполнить анализ. Попробуйте ещё раз."
+TIMEOUT = 90
+FALLBACK = "Analysis failed. Please try again."
 
 
 def analyze_for_tts(out=OUT_FILE, url=SERVER_URL, timeout=TIMEOUT):
-    """POST /analyze -> описание сцены -> текст в файл -> вернуть путь к файлу.
+    """
+    POST /analyze -> scene description -> text to file -> return file path. 
 
-    Возвращает `out` (путь к файлу с текстом для TTS).
+    Returns `out` (path to the file containing text for TTS).
     """
     try:
         req = urllib.request.Request(
@@ -45,9 +46,9 @@ def analyze_for_tts(out=OUT_FILE, url=SERVER_URL, timeout=TIMEOUT):
             resp = json.loads(r.read().decode("utf-8"))
         text = (resp.get("summary") or "").strip()
         if not text:
-            raise RuntimeError(resp.get("err") or "пустой ответ VLM")
+            raise RuntimeError(resp.get("err") or "empty VLM response")
     except Exception:
-        text = FALLBACK  # чтобы TTS было что озвучить
+        text = FALLBACK
     tmp = out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text if text.endswith("\n") else text + "\n")
@@ -56,5 +57,4 @@ def analyze_for_tts(out=OUT_FILE, url=SERVER_URL, timeout=TIMEOUT):
 
 
 if __name__ == "__main__":
-    # Ручной тест: python3 analyze_for_tts.py  -> печатает путь.
     print(analyze_for_tts())

@@ -16,8 +16,6 @@ PROJECT_DIR = Path(__file__).resolve().parent
 KB_CACHE_WAV_DIR = PROJECT_DIR / "kb_audio"
 KB_CACHE_WAV_DIR.mkdir(parents=True, exist_ok=True)
 
-# Замените clean_text и цикл записи в main() в build_kb_cache.py:
-
 from main import GESTURE_REGEX, normalize_gesture_name
 
 
@@ -37,14 +35,14 @@ def clean_text_for_tts(text: str) -> str:
 def main():
     dump_file = PROJECT_DIR / "kb_dump.json"
     if not dump_file.exists():
-        print(f"[-] Файл {dump_file} не найден. Сохраните базу!")
+        print(f"[-] File {dump_file} not found. Save the database.!")
         return
 
     with open(dump_file, "r", encoding="utf-8") as f:
         data = json.load(f)
         
     qa_items = data.get("qa", [])
-    print(f"[+] Загружено {len(qa_items)} вопросов и ответов. Инициализация движка TTS...")
+    print(f"[+] Loaded {len(qa_items)} questions and answers. Initializing TTS engine...")
 
     kb_cache = SemanticCache(
         index_path=PROJECT_DIR / "kb_index.faiss",
@@ -53,7 +51,7 @@ def main():
     
     tts = TTSEngine(warmup_on_init=False)
 
-    print("[+] Начинаем генерацию аудиофайлов и заполнение базы знаний...\n")
+    print("[+] Starting audio file generation and knowledge base filling...\n")
     
     for item in qa_items:
         query = item.get('query', '').strip()
@@ -69,18 +67,18 @@ def main():
 
         clean_answer = clean_text_for_tts(raw_answer)
         stored_response = (
-            f'[жест: {g_name}] {clean_answer}' if g_name else clean_answer
+            f'[gesture: {g_name}] {clean_answer}' if g_name else clean_answer
         )
 
         wav_path = str(KB_CACHE_WAV_DIR / f'{uuid.uuid4().hex}.wav')
         try:
             tts.synthesize(clean_answer, 'ru', wav_path)
             kb_cache.put(query, stored_response, wav_path, 'ru')
-            print('-> Успешно добавлено в базу знаний.')
+            print('-> Successfully added to knowledge base.')
         except Exception as e:
-            print(f'-> Ошибка синтеза: {e}')
+            print(f'-> Synthesis error: {e}')
         
-    print("\n[+] Все пары вопрос-ответ успешно озвучены и сохранены в кэш!")
+    print("\n[+] All question-answer pairs successfully synthesized and saved in cache!")
 
 if __name__ == "__main__":
     main()

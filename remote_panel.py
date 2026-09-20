@@ -10,7 +10,7 @@ print("  - Default voice output is in RUSSIAN.")
 print("  - For a different language, use a prefix: /en, /zh-cn, /es, etc.")
 print("    Example: /en Hello, dear guest!")
 print("  - The /stop command will interrupt the current speech.")
-print("  - Gestures work too: /en [gesture: shakehands] Nice to meet you!")
+print("  - Gestures work too: /en [жест|jest|gest|gesture: shakehands] Nice to meet you!")
 print("Press Ctrl+C to exit\n")
 
 while True:

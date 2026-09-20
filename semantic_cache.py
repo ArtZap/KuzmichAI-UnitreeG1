@@ -99,8 +99,6 @@ class SemanticCache:
             return env_model
         for candidate in (
             Path(__file__).resolve().parent / "models" / "sentence_transformer",
-            Path("/home/unitree/AgroBot-G1-Unified/models/sentence_transformer"),
-            Path("/home/unitree/agrobot/AgroHub/models/sentence_transformer"),
         ):
             if (candidate / "modules.json").exists():
                 return str(candidate)
