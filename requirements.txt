@@ -1,20 +1,48 @@
+# Versions are pinned to a set tested together (Pop!_OS 24.04, Python 3.11, RTX 4080).
+# Install with ./setup.sh: it picks the torch/llama-cpp-python builds for your GPU driver
+# before installing this file.
+
 # --- LLM & AI Core ---
-llama-cpp-python>=0.2.20
-sentence-transformers>=2.2.2
+# setup.sh installs the CUDA build first; this pin keeps pip from replacing it
+llama-cpp-python==0.3.19
+sentence-transformers==5.7.0
+# coqui-tts (XTTS) imports transformers internals that were removed in 5.x
+transformers==4.57.6
+tokenizers==0.22.2
+huggingface_hub==0.36.2
+requests>=2.28
 
 # --- Speech-to-Text (STT) ---
-faster-whisper>=0.9.0
-nemo_toolkit[asr]>=1.20.0
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+onnx-asr==0.12.0
+# nemo_toolkit is only needed for VOICE_ENGINE_STT_BACKEND=nemo; install it separately.
+# Left here it makes pip backtrack to nemo 2.0 + datasets 2.14, which is broken with
+# current pyarrow and takes sentence-transformers down with it.
+# sentence-transformers imports `datasets` when present, so keep it modern
+datasets>=3.0
+# CUDA 12 runtime for ctranslate2 (faster-whisper) and the prebuilt CUDA llama-cpp-python;
+# start.sh adds nvidia/cublas/lib and nvidia/cudnn/lib to LD_LIBRARY_PATH
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10
+nvidia-cuda-runtime-cu12
 
 # --- Text-to-Speech (TTS) ---
-TTS>=0.22.0
+# Maintained fork of Coqui TTS (same `TTS` import). Do not install the old `TTS` package next to it.
+coqui-tts[codec,ja,zh]==0.27.5
+coqpit-config==0.2.5
+torchcodec==0.17.0
+ruaccent==1.5.8.3
+# Silero TTS (torch.hub snakers4/silero-models) imports it
+omegaconf>=2.3
 soundfile>=0.12.1
 
 # --- Audio & Hardware Integration ---
 sounddevice>=0.4.6
 numpy>=1.24.0
-torch>=2.0.0
-torchaudio>=2.0.0
+# CUDA flavour (cu130 / cu126 / cpu) is chosen by setup.sh from the driver version
+torch==2.14.1
+torchaudio==2.11.0
 
 # --- Vector Database & Caching ---
 faiss-cpu>=1.7.4
