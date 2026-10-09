@@ -431,6 +431,7 @@ class AudioListener:
         config: Optional[AudioConfig] = None,
         local_mode: bool = False,
         mic_device: Optional[Union[int, str]] = None,
+        mic: Optional[Any] = None,
     ) -> None:
         self.state = shared_state
         self.cfg = config or AudioConfig()
@@ -444,7 +445,12 @@ class AudioListener:
 
         self._interrupt_voiced_run: int = 0
 
-        if local_mode:
+        if mic is not None:
+            # Any PCM source with start/get_chunk/drain/stop (e.g. ext_mic.ExternalMicReceiver)
+            self.g1_audio = None
+            self.mic = mic
+            logger.info("AudioListener initialized with external mic source %s.", type(mic).__name__)
+        elif local_mode:
             self.g1_audio = None
             self.mic = LocalMicSource(
                 sample_rate=self.cfg.sample_rate,

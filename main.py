@@ -160,7 +160,9 @@ EXECUTOR_MAX_WORKERS = 4
 # Switched by the environment variable, for example:
 #   VOICE_ENGINE_AUDIO=local python main.py
 AUDIO_MODE = os.environ.get("VOICE_ENGINE_AUDIO", "g1").strip().lower()
-if AUDIO_MODE not in ("g1", "local"):
+#   "g1_extmic" — external mic plugged into the robot's Jetson, robot speaker;
+#            both through jetson_mic_bridge.py (see G1_EXTMIC.md).
+if AUDIO_MODE not in ("g1", "local", "g1_extmic"):
     log.warning("Unknown value for VOICE_ENGINE_AUDIO=%r, using 'g1'.", AUDIO_MODE)
     AUDIO_MODE = "g1"
 
@@ -238,9 +240,12 @@ class VoiceAssistant:
         cfg = AudioConfig(vad_threshold=NOISE_THRESHOLD)
 
         local_mode = (AUDIO_MODE == "local")
-        self.listener = AudioListener(self.shared_state, config=cfg, local_mode=local_mode)
-        self.player = LocalAudioPlayer(self.shared_state) if local_mode else AudioPlayer(self.shared_state)
-        log.info("Audio mode: %s", "LOCAL (microphone/speakers of the laptop)" if local_mode else "G1 (robot network)")
+        if AUDIO_MODE == "g1_extmic":
+            self.listener, self.player = self._init_extmic_audio(cfg)
+        else:
+            self.listener = AudioListener(self.shared_state, config=cfg, local_mode=local_mode)
+            self.player = LocalAudioPlayer(self.shared_state) if local_mode else AudioPlayer(self.shared_state)
+            log.info("Audio mode: %s", "LOCAL (microphone/speakers of the laptop)" if local_mode else "G1 (robot network)")
 
         self.is_awake = not USE_TRIGGERS
         self.is_analiz = False
@@ -425,6 +430,42 @@ class VoiceAssistant:
             wav_path,
             lang_code,
         )
+
+    def _init_extmic_audio(self, cfg):
+        """
+        g1_extmic: microphone from jetson_mic_bridge.py on the robot, playback on the
+        robot speaker. VOICE_ENGINE_EXTMIC_PLAYER picks the speaker path:
+          "bridge" (default) — through the same bridge, works over Wi-Fi;
+          "g1"    — DDS PlayStream like g1 mode (needs unitree_sdk2py + robot LAN);
+          "local" — laptop speakers (handy for testing the mic alone).
+        """
+        from ext_mic import (DEFAULT_MIC_PORT, DEFAULT_PLAY_PORT, BridgeAudioPlayer,
+                             ExternalMicReceiver, bridge_host_from_env)
+
+        host = bridge_host_from_env()
+        mic = ExternalMicReceiver(
+            bridge_host=host,
+            bridge_port=int(os.environ.get("VOICE_ENGINE_BRIDGE_MIC_PORT", DEFAULT_MIC_PORT)),
+            queue_maxsize=cfg.mic_queue_maxsize,
+        )
+        listener = AudioListener(self.shared_state, config=cfg, mic=mic)
+
+        player_kind = os.environ.get("VOICE_ENGINE_EXTMIC_PLAYER", "bridge").strip().lower()
+        if player_kind == "g1":
+            player = AudioPlayer(self.shared_state)
+        elif player_kind == "local":
+            player = LocalAudioPlayer(self.shared_state)
+        else:
+            if player_kind != "bridge":
+                log.warning("Unknown VOICE_ENGINE_EXTMIC_PLAYER=%r, using 'bridge'.", player_kind)
+                player_kind = "bridge"
+            player = BridgeAudioPlayer(
+                self.shared_state,
+                bridge_host=host,
+                bridge_port=int(os.environ.get("VOICE_ENGINE_BRIDGE_PLAY_PORT", DEFAULT_PLAY_PORT)),
+            )
+        log.info("Audio mode: G1_EXTMIC (mic via bridge %s, speaker: %s)", host, player_kind)
+        return listener, player
 
     async def _play(self, wav_path: str) -> None:
         loop = asyncio.get_event_loop()

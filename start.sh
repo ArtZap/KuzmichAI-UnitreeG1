@@ -17,7 +17,7 @@ NC='\033[0m'
 # Main Operating Modes
 export VOICE_ENGINE_ENABLE_STREAMING="false"  # true: streaming generation, false: wait for complete response
 export VOICE_ENGINE_ENABLE_PLAYBACK="true"    # true: robot speaks the response, false: console output only
-export VOICE_ENGINE_AUDIO="local"
+export VOICE_ENGINE_AUDIO="${VOICE_ENGINE_AUDIO:-local}"  # "local", "g1" or "g1_extmic" (see G1_EXTMIC.md)
 export VOICE_ENGINE_ENABLE_CONTEXT="true"     # true: robot remembers last phrases, false: isolated questions
 export VOICE_ENGINE_MAX_HISTORY_TURNS=5       # number of QA pairs remembered
 export VOICE_ENGINE_ENABLE_GESTURES="true"   # true: robot gestures, false: stands still
@@ -40,7 +40,13 @@ export VOICE_ENGINE_XTTS_SPLIT_SENTENCES="true"
 export VOICE_ENGINE_DDS_INTERFACE="eth0"
 export VOICE_ENGINE_MIC_LOCAL_IP="192.168.123.164"
 export VOICE_ENGINE_G1_VOLUME="90"
-export VOICE_ENGINE_ROBOT_IP="192.168.1.103"
+export VOICE_ENGINE_ROBOT_IP="${VOICE_ENGINE_ROBOT_IP:-192.168.1.103}"
+
+# g1_extmic mode: jetson_mic_bridge.py on the robot (defaults to VOICE_ENGINE_ROBOT_IP)
+export VOICE_ENGINE_BRIDGE_HOST="${VOICE_ENGINE_BRIDGE_HOST:-$VOICE_ENGINE_ROBOT_IP}"
+export VOICE_ENGINE_BRIDGE_MIC_PORT="${VOICE_ENGINE_BRIDGE_MIC_PORT:-5556}"
+export VOICE_ENGINE_BRIDGE_PLAY_PORT="${VOICE_ENGINE_BRIDGE_PLAY_PORT:-5557}"
+export VOICE_ENGINE_EXTMIC_PLAYER="${VOICE_ENGINE_EXTMIC_PLAYER:-bridge}"  # "bridge", "g1" or "local"
 
 # System Settings and Python
 export CUDA_VISIBLE_DEVICES="0"
