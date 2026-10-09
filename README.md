@@ -55,7 +55,7 @@ graph TD
 ├── ext_mic.py               # g1_extmic mode: laptop side of the Jetson mic bridge
 ├── jetson_mic_bridge.py     # g1_extmic mode: runs on the robot's Jetson (stdlib only)
 ├── deploy_jetson_bridge.sh  # Copies the bridge + key to the robot and starts it
-├── G1_EXTMIC.md             # g1_extmic setup guide and troubleshooting (in Russian)
+├── G1_EXTMIC.md             # g1_extmic setup guide and troubleshooting
 ├── llm_engine.py            # LLM streaming and prompt/persona management
 ├── stt_engine.py            # STT router (Whisper, NeMo, Hybrid GigaAM)
 ├── tts_engine.py            # TTS router (XTTS, Silero, Piper, eSpeak)

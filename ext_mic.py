@@ -19,8 +19,11 @@ to 16 bytes); deploy_jetson_bridge.sh creates it and copies it to the robot.
 No timestamps are used, so the laptop and Jetson clocks need not agree.
 
 Wire protocol (keep in sync with jetson_mic_bridge.py):
-  UDP subscribe, laptop -> bridge, every SUBSCRIBE_INTERVAL_S:
-      SUB_MAGIC | nonce(16) | mac(SUB_MAGIC | nonce)
+  UDP subscribe, renewed every SUBSCRIBE_INTERVAL_S:
+      laptop -> bridge  HELLO_MAGIC
+      bridge -> laptop  CHAL_MAGIC | challenge(16)        (single use, short-lived)
+      laptop -> bridge  SUB_MAGIC | challenge | nonce(16) | mac(SUB_MAGIC | challenge | nonce)
+      A captured subscribe cannot be replayed: its challenge is already spent.
   UDP audio, bridge -> laptop:
       nonce(16) | session(8) | seq(8, BE) | pcm | mac(all previous fields)
       nonce = one of the laptop's recent subscribe nonces, so packets captured
@@ -50,7 +53,9 @@ from typing import Optional
 
 logger = logging.getLogger("ext_mic")
 
-SUB_MAGIC = b"KZM_MIC_SUB2"
+HELLO_MAGIC = b"KZM_MIC_HELO"
+CHAL_MAGIC = b"KZM_MIC_CHAL"
+SUB_MAGIC = b"KZM_MIC_SUB3"
 PLAY_MAGIC = b"KZMPLAY2"
 MAC_LEN = 16
 NONCE_LEN = 16
@@ -152,14 +157,11 @@ class ExternalMicReceiver:
         warned = False
         started_at = time.monotonic()
         while not self._stop_event.is_set():
-            nonce = os.urandom(NONCE_LEN)
-            with self._nonce_lock:
-                self._nonces.append(nonce)
+            # The bridge answers with a challenge; _recv_loop completes the subscription
             try:
-                sock.sendto(SUB_MAGIC + nonce + mac(self.key, SUB_MAGIC, nonce),
-                            (self._bridge_ip, self.bridge_port))
+                sock.sendto(HELLO_MAGIC, (self._bridge_ip, self.bridge_port))
             except OSError as e:
-                logger.debug("External mic: subscribe send failed: %s", e)
+                logger.debug("External mic: hello send failed: %s", e)
 
             since = time.monotonic() - (self._last_audio_at or started_at)
             if since > self.no_audio_warn_s and not warned:
@@ -173,6 +175,16 @@ class ExternalMicReceiver:
                 logger.info("External mic: audio stream restored.")
                 warned = False
             self._stop_event.wait(SUBSCRIBE_INTERVAL_S)
+
+    def _answer_challenge(self, sock: socket.socket, challenge: bytes) -> None:
+        nonce = os.urandom(NONCE_LEN)
+        with self._nonce_lock:
+            self._nonces.append(nonce)
+        try:
+            sock.sendto(SUB_MAGIC + challenge + nonce + mac(self.key, SUB_MAGIC, challenge, nonce),
+                        (self._bridge_ip, self.bridge_port))
+        except OSError as e:
+            logger.debug("External mic: subscribe send failed: %s", e)
 
     def _accept(self, data: bytes) -> Optional[bytes]:
         """Returns the PCM payload of an authentic, fresh audio packet, else None."""
@@ -206,7 +218,11 @@ class ExternalMicReceiver:
                 continue
             except OSError:
                 break
-            pcm = self._accept(data) if addr[0] == self._bridge_ip else None
+            from_bridge = addr[0] == self._bridge_ip
+            if from_bridge and len(data) == len(CHAL_MAGIC) + NONCE_LEN and data.startswith(CHAL_MAGIC):
+                self._answer_challenge(sock, data[len(CHAL_MAGIC):])
+                continue
+            pcm = self._accept(data) if from_bridge else None
             if pcm is None:
                 rejected += 1
                 if rejected in (1, 100, 1000):

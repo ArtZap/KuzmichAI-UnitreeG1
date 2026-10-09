@@ -7,8 +7,8 @@ Standard library only (Python 3.6+), plus `arecord` from alsa-utils.
 
   * Captures an external microphone (USB sound card) with arecord as raw PCM
     16 kHz mono int16 LE - the RockChip multicast format - and sends it over
-    UDP to the laptop that subscribed (the laptop sends a signed subscribe
-    packet every second, so the bridge never needs the laptop's IP).
+    UDP to the laptop that subscribed (the laptop renews a challenge-based,
+    signed subscription every second, so the bridge never needs its IP).
   * Accepts WAV files over TCP from the laptop and plays them on the robot
     speaker with g1_audio_play (or aplay when that is not present).
 
@@ -38,7 +38,9 @@ import time
 import wave
 
 # Protocol constants, shared with ext_mic.py on the laptop
-SUB_MAGIC = b"KZM_MIC_SUB2"
+HELLO_MAGIC = b"KZM_MIC_HELO"
+CHAL_MAGIC = b"KZM_MIC_CHAL"
+SUB_MAGIC = b"KZM_MIC_SUB3"
 PLAY_MAGIC = b"KZMPLAY2"
 MAC_LEN = 16
 NONCE_LEN = 16
@@ -46,6 +48,8 @@ NONCE_LEN = 16
 SAMPLE_RATE = 16000
 CHUNK_BYTES = 1024            # 512 samples = 32 ms, one Silero-VAD frame
 SUBSCRIBER_TTL_S = 5.0        # stop streaming when the laptop goes quiet
+CHALLENGE_TTL_S = 5.0         # a subscribe must answer a challenge issued this recently
+MAX_PENDING_CHALLENGES = 64
 MAX_WAV_BYTES = 50 * 1024 * 1024
 MAX_PLAY_S = 300.0
 MAX_CLIENTS = 4
@@ -109,22 +113,51 @@ class MicStreamer:
         self.nonce = None               # latest subscribe nonce, echoed in audio packets
         self.subscriber_seen = 0.0
         self._lock = threading.Lock()
+        # Single-use challenges: server nonce -> (address it was issued to, issue time)
+        self._challenges = collections.OrderedDict()
+
+    def _issue_challenge(self, addr):
+        challenge = os.urandom(NONCE_LEN)
+        self._challenges[challenge] = (addr, time.monotonic())
+        if len(self._challenges) > MAX_PENDING_CHALLENGES:
+            # A HELLO flood must not evict the connected laptop's challenge, or its
+            # renewal fails and the mic stream stops; drop the oldest stranger's instead.
+            victim = next((c for c, (a, _) in self._challenges.items() if a != self.subscriber),
+                          next(iter(self._challenges)))
+            del self._challenges[victim]
+        try:
+            self.sock.sendto(CHAL_MAGIC + challenge, addr)
+        except OSError as e:
+            log.debug("challenge send failed: %s", e)
+
+    def _redeem_challenge(self, challenge, addr):
+        """True once for a fresh challenge issued to addr; replays fail."""
+        issued = self._challenges.pop(challenge, None)
+        return (issued is not None and issued[0] == addr
+                and time.monotonic() - issued[1] < CHALLENGE_TTL_S)
 
     def subscription_loop(self):
         bad = 0
-        expected = len(SUB_MAGIC) + NONCE_LEN + MAC_LEN
+        expected = len(SUB_MAGIC) + 2 * NONCE_LEN + MAC_LEN
         while True:
             try:
                 data, addr = self.sock.recvfrom(256)
             except OSError:
                 return
+            if data == HELLO_MAGIC:
+                self._issue_challenge(addr)
+                continue
             body, tag = data[:-MAC_LEN], data[-MAC_LEN:]
+            challenge = body[len(SUB_MAGIC):len(SUB_MAGIC) + NONCE_LEN]
+            # Check the MAC before redeeming, so junk packets cannot burn real challenges
             if (len(data) != expected or not data.startswith(SUB_MAGIC)
-                    or not hmac.compare_digest(mac(self.key, body), tag)):
+                    or not hmac.compare_digest(mac(self.key, body), tag)
+                    or not self._redeem_challenge(challenge, addr)):
                 bad += 1
                 if bad in (1, 100, 1000):
-                    log.warning("Rejected %d unauthenticated subscribe packets (last from %s). "
-                                "Wrong key? Re-run deploy_jetson_bridge.sh.", bad, addr[0])
+                    log.warning("Rejected %d unauthenticated or replayed subscribe packets "
+                                "(last from %s). Wrong key? Re-run deploy_jetson_bridge.sh.",
+                                bad, addr[0])
                 continue
             with self._lock:
                 if addr != self.subscriber:
@@ -134,7 +167,7 @@ class MicStreamer:
                     else:
                         log.info("Laptop subscribed: %s:%d", addr[0], addr[1])
                 self.subscriber = addr
-                self.nonce = body[len(SUB_MAGIC):]
+                self.nonce = body[len(SUB_MAGIC) + NONCE_LEN:]
                 self.subscriber_seen = time.monotonic()
 
     def _target(self):
